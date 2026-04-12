@@ -1,6 +1,8 @@
 <html>
     <body>
-        <h1>Timmy is up.</h1>
-        <p>Dataset location: <code>{{td.location}}</code></p>
+        <h1>Timmy</h1>
+        <p>
+            <pre><code>{{ td.conn.query("""select source, count(*) as record_count from metadata.current_records group by all order by source;""") }}</code></pre>
+        </p>
     </body>
 </html>

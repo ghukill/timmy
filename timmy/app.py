@@ -57,14 +57,14 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
 
     # load TIMDEXDataset once when the app boots
     app.extensions["td"] = get_dataset()
+    app.td = app.extensions["td"]  # NOTE: convenience dot notation
     app.logger.info("Dataset loaded from %s", app.extensions["td"].location)
 
     @app.get("/")
     def index() -> str:
-        td = current_app.extensions["td"]
         return render_template(
             "index.html",
-            td=td,
+            td=app.td,
         )
 
     return app
