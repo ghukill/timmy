@@ -3,9 +3,10 @@ from __future__ import annotations
 from logging.config import dictConfig
 from typing import Any
 
-from flask import Flask, render_template
+from flask import Flask
 
 from timmy.dataset import get_dataset
+from timmy.main import main
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -65,15 +66,9 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
 
     # load TIMDEXDataset once when the app boots
     app.extensions["td"] = get_dataset(dataset_location)
-    app.td = app.extensions["td"]  # NOTE: convenience dot notation, may remove
     app.logger.info("Dataset loaded from %s", app.extensions["td"].location)
 
-    @app.get("/")
-    def index() -> str:
-        return render_template(
-            "index.html",
-            td=app.td,
-        )
+    app.register_blueprint(main)
 
     return app
 
