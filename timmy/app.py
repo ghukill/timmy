@@ -5,7 +5,7 @@ from typing import Any
 
 from flask import Flask
 
-from timmy.dataset import get_dataset
+from timmy.dataset import load_dataset
 from timmy.main import main
 
 
@@ -65,7 +65,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         )
 
     # load TIMDEXDataset once when the app boots
-    app.extensions["td"] = get_dataset(dataset_location)
+    app.extensions["td"] = load_dataset(dataset_location)
     app.logger.info("Dataset loaded from %s", app.extensions["td"].location)
 
     app.register_blueprint(main)
