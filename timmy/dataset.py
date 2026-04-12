@@ -1,10 +1,12 @@
-import os
-
 from timdex_dataset_api import TIMDEXDataset
 
 
-def get_dataset() -> TIMDEXDataset:
+def get_dataset(
+    location: str,
+    *,
+    preload_current_records: bool = True,
+) -> TIMDEXDataset:
     return TIMDEXDataset(
-        os.environ["TIMDEX_DATASET_LOCATION"],
-        preload_current_records=True,
+        location,
+        preload_current_records=preload_current_records,
     )
