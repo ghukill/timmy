@@ -1,0 +1,19 @@
+[project]
+name = "timmy"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "flask>=3.1.3",
+    "timdex-dataset-api",
+]
+
+[tool.uv.sources]
+timdex-dataset-api = { git = "https://github.com/MITLibraries/timdex-dataset-api", rev = "USE-496-v5-data-source-refactor" }
+
+[dependency-groups]
+dev = [
+    "ipython>=9.12.0",
+    "ruff>=0.15.10",
+]
