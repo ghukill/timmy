@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from typing import Any
 from urllib.parse import urlparse
 
 import boto3
@@ -27,7 +26,7 @@ def _normalize_endpoint(endpoint: str) -> tuple[str, int, bool]:
     return host, parsed.port or 443, True
 
 
-def configure_opensearch_client(endpoint: str) -> OpenSearch:
+def configure_opensearch_client(endpoint: str, auth_service_type: str = "es") -> OpenSearch:
     """Create an OpenSearch client for a local or AWS-managed endpoint."""
     host, port, use_ssl = _normalize_endpoint(endpoint)
 
@@ -49,11 +48,11 @@ def configure_opensearch_client(endpoint: str) -> OpenSearch:
 
     region = os.getenv("AWS_REGION", "us-east-1")
 
-    auth_service_type = os.getenv("AUTH_SERVICE_TYPE", "es")
     if auth_service_type not in VALID_AUTH_SERVICE_TYPES:
         valid = ", ".join(sorted(VALID_AUTH_SERVICE_TYPES))
         raise ValueError(
-            f"AUTH_SERVICE_TYPE must be one of {valid}; got {auth_service_type!r}"
+            "TIMDEX_OPENSEARCH_AUTH_SERVICE_TYPE must be one of "
+            f"{valid}; got {auth_service_type!r}"
         )
 
     auth = AWSV4SignerAuth(
@@ -84,17 +83,14 @@ def get_opensearch_endpoint() -> str:
     return endpoint
 
 
+def get_opensearch_auth_service_type() -> str:
+    """Return configured OpenSearch auth service type from Flask app config."""
+    return current_app.config.get("TIMDEX_OPENSEARCH_AUTH_SERVICE_TYPE", "es")
+
+
 def get_opensearch_client() -> OpenSearch:
     """Return an OpenSearch client using Flask app config."""
-    return configure_opensearch_client(get_opensearch_endpoint())
-
-
-def search_index(
-    index: str,
-    query: dict[str, Any],
-    *,
-    size: int = 10,
-) -> dict[str, Any]:
-    """Run a simple search request against an index or alias."""
-    client = get_opensearch_client()
-    return client.search(index=index, body={"size": size, "query": query})
+    return configure_opensearch_client(
+        get_opensearch_endpoint(),
+        auth_service_type=get_opensearch_auth_service_type(),
+    )
