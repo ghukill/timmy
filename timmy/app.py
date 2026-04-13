@@ -13,6 +13,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "SECRET_KEY": "dev",
     "LOG_LEVEL": "INFO",
     "TIMDEX_DATASET_LOCATION": None,
+    "TIMDEX_OPENSEARCH_ENDPOINT": None,
 }
 
 
