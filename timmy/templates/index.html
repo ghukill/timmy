@@ -1,6 +1,7 @@
 <html>
     <body>
         <h1>Timmy</h1>
+        <p><a href="{{ url_for('main.records') }}">Browse records &rarr;</a></p>
         <p>
             <pre><code>{{ td.conn.query("""select source, count(*) as record_count from metadata.current_records group by all order by source;""") }}</code></pre>
         </p>

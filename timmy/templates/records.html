@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Timmy &mdash; Records</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.datatables.net/2.1.8/css/dataTables.dataTables.min.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css"
+    />
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 2rem;
+      }
+      td {
+        font-family: ui-monospace, monospace;
+        font-size: 0.85rem;
+      }
+      details.filters {
+        border: 1px solid #ccc;
+        border-radius: 6px;
+        padding: 0.5rem 1rem 1rem;
+        margin-bottom: 1.5rem;
+        max-width: 720px;
+      }
+      details.filters summary {
+        cursor: pointer;
+        font-weight: 600;
+      }
+      .filters .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.75rem 1.5rem;
+        margin-top: 1rem;
+      }
+      .filters label {
+        display: flex;
+        flex-direction: column;
+        font-size: 0.85rem;
+        gap: 0.25rem;
+      }
+      .filters label.wide {
+        grid-column: 1 / -1;
+      }
+      .filters input {
+        padding: 0.35rem 0.5rem;
+        font-family: ui-monospace, monospace;
+      }
+      .filters .actions {
+        margin-top: 1rem;
+        display: flex;
+        gap: 0.5rem;
+      }
+      .filters .warn {
+        color: #a15c00;
+        font-size: 0.75rem;
+      }
+      .filters .CodeMirror {
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        height: auto;
+        min-height: 70px;
+        font-size: 0.85rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Records</h1>
+    <p>
+      Metadata-first browse of <code>metadata.current_records</code>. Paging,
+      search, and sorting are handled server-side in DuckDB.
+    </p>
+
+    <details class="filters">
+      <summary>Filters</summary>
+      <div class="grid">
+        <label>
+          source <span class="warn">comma-separated</span>
+          <input id="f_source" placeholder="alma, dspace" />
+        </label>
+        <label>
+          run_date <span class="warn">YYYY-MM-DD</span>
+          <input id="f_run_date" placeholder="2025-01-01" />
+        </label>
+        <label>
+          run_type <span class="warn">comma-separated</span>
+          <input id="f_run_type" placeholder="daily, full" />
+        </label>
+        <label>
+          action <span class="warn">comma-separated</span>
+          <input id="f_action" placeholder="index, delete" />
+        </label>
+        <label>
+          run_id <span class="warn">comma-separated</span>
+          <input id="f_run_id" />
+        </label>
+        <label class="wide">
+          where <span class="warn">raw SQL predicate &mdash; unsafe, advanced use only</span>
+          <textarea id="f_where"></textarea>
+        </label>
+      </div>
+      <div class="actions">
+        <button type="button" id="apply">Apply filters</button>
+        <button type="button" id="clear">Clear</button>
+        <button type="button" id="format">Format SQL</button>
+      </div>
+    </details>
+
+    <table id="records" class="display" style="width: 100%">
+      <thead>
+        <tr>
+          {% for col in columns %}
+          <th>{{ col }}</th>
+          {% endfor %}
+        </tr>
+      </thead>
+    </table>
+
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.datatables.net/2.1.8/js/dataTables.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/sql/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/display/placeholder.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sql-formatter/15.4.9/sql-formatter.min.js"></script>
+    <script>
+      // Text inputs sent verbatim. f_where is handled separately via CodeMirror.
+      const FILTER_IDS = [
+        "f_source",
+        "f_run_date",
+        "f_run_type",
+        "f_action",
+        "f_run_id",
+      ];
+
+      // Turn the raw-SQL textarea into a SQL-highlighted CodeMirror editor.
+      const whereEditor = CodeMirror.fromTextArea(
+        document.getElementById("f_where"),
+        {
+          mode: "text/x-sql",
+          lineNumbers: true,
+          lineWrapping: true,
+          placeholder: "lower(source) like '%mit%'",
+        },
+      );
+
+      const table = new DataTable("#records", {
+        serverSide: true,
+        processing: true,
+        ajax: {
+          url: "{{ url_for('main.records_data') }}",
+          // Attach the filter inputs to every server-side request.
+          data: function (d) {
+            FILTER_IDS.forEach((id) => {
+              d[id] = document.getElementById(id).value.trim();
+            });
+            d.f_where = whereEditor.getValue().trim();
+          },
+        },
+        // Single ordering column keeps the server-side SQL simple.
+        orderMulti: false,
+        order: [[1, "asc"]],
+        pageLength: 25,
+        lengthMenu: [10, 25, 50, 100],
+        columns: [
+          {% for col in columns %}
+          { data: "{{ col }}" }{{ "," if not loop.last }}
+          {% endfor %}
+        ],
+      });
+
+      // Reload (back to page 1) when filters are applied or cleared.
+      document.getElementById("apply").addEventListener("click", () => {
+        table.ajax.reload();
+      });
+      document.getElementById("clear").addEventListener("click", () => {
+        FILTER_IDS.forEach((id) => (document.getElementById(id).value = ""));
+        whereEditor.setValue("");
+        table.ajax.reload();
+      });
+
+      // Pretty-print the raw SQL in place using sql-formatter.
+      document.getElementById("format").addEventListener("click", () => {
+        const sql = whereEditor.getValue().trim();
+        if (!sql) return;
+        try {
+          // DuckDB isn't a sql-formatter dialect; postgresql is the closest.
+          whereEditor.setValue(sqlFormatter.format(sql, { language: "postgresql" }));
+        } catch (err) {
+          console.error("SQL format failed:", err);
+        }
+      });
+    </script>
+  </body>
+</html>
