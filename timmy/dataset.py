@@ -1,6 +1,15 @@
+import threading
+
 from flask import current_app
 
 from timdex_dataset_api import TIMDEXDataset
+
+# The app shares a single TIMDEXDataset (and its one DuckDB connection) across
+# threaded requests. A DuckDB connection cannot run queries concurrently, so all
+# dataset/DuckDB access must be serialized through this lock. Without it,
+# overlapping requests (e.g. the versions page fetching two payloads in parallel
+# to diff them) raise "closed pending query result".
+dataset_lock = threading.Lock()
 
 
 def load_dataset(

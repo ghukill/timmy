@@ -73,7 +73,9 @@
     <h1>Records</h1>
     <p>
       Metadata-first browse of <code>metadata.current_records</code>. Paging,
-      search, and sorting are handled server-side in DuckDB.
+      search, and sorting are handled server-side in DuckDB. Defaults to
+      <code>action = index</code> (records currently in TIMDEX); adjust the
+      action filter to surface deleted/errored records.
     </p>
 
     <details class="filters">
@@ -93,7 +95,7 @@
         </label>
         <label>
           action <span class="warn">comma-separated</span>
-          <input id="f_action" placeholder="index, delete" />
+          <input id="f_action" value="index" placeholder="index, delete" />
         </label>
         <label>
           run_id <span class="warn">comma-separated</span>
@@ -168,7 +170,24 @@
         lengthMenu: [10, 25, 50, 100],
         columns: [
           {% for col in columns %}
-          { data: "{{ col }}" }{{ "," if not loop.last }}
+          {
+            data: "{{ col }}"
+            {%- if col == "timdex_record_id" %},
+            // Link the id to the record detail page (key = id/run_id/offset).
+            render: function (data, type, row) {
+              if (type !== "display") return data;
+              const href =
+                "{{ url_for('main.records') }}".replace(/records$/, "record/") +
+                encodeURIComponent(data) + "/" +
+                encodeURIComponent(row.run_id) + "/" +
+                encodeURIComponent(row.run_record_offset);
+              const a = document.createElement("a");
+              a.href = href;
+              a.textContent = data;
+              return a.outerHTML;
+            }
+            {%- endif %}
+          }{{ "," if not loop.last }}
           {% endfor %}
         ],
       });

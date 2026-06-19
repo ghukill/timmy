@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Timmy &mdash; versions of {{ timdex_record_id }}</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.datatables.net/2.1.8/css/dataTables.dataTables.min.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/diff2html@3.4.52/bundles/css/diff2html.min.css"
+    />
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 2rem;
+      }
+      a.back {
+        font-size: 0.85rem;
+      }
+      h1 {
+        font-family: ui-monospace, monospace;
+        font-size: 1.3rem;
+        word-break: break-all;
+      }
+      .badge {
+        display: inline-block;
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        background: #eef;
+        color: #335;
+        border-radius: 3px;
+        padding: 0.1rem 0.4rem;
+        margin-left: 0.5rem;
+        vertical-align: middle;
+      }
+      td {
+        font-family: ui-monospace, monospace;
+        font-size: 0.82rem;
+      }
+      .hint {
+        font-size: 0.85rem;
+        color: #555;
+      }
+      section.diff {
+        margin-top: 2rem;
+      }
+      section.diff h2 {
+        font-size: 1.05rem;
+        border-bottom: 1px solid #ddd;
+        padding-bottom: 0.25rem;
+      }
+      .diff-target {
+        margin-bottom: 2rem;
+      }
+      .diff-meta {
+        font-size: 0.8rem;
+        color: #555;
+        margin: 0.5rem 0;
+      }
+    </style>
+  </head>
+  <body>
+    <p><a class="back" href="{{ url_for('main.records') }}">&larr; Back to records</a></p>
+    <h1>{{ timdex_record_id }}<span class="badge">{{ source }}</span></h1>
+    <p class="hint">
+      All versions across runs, newest first. Tick <strong>two</strong> rows to
+      diff their source and transformed payloads below.
+    </p>
+
+    <table id="versions" class="display" style="width: 100%">
+      <thead>
+        <tr>
+          <th></th>
+          {% for col in columns %}
+          <th>{{ col }}</th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for v in versions %}
+        <tr>
+          <td>
+            <input
+              type="checkbox"
+              class="vsel"
+              data-key="{{ v.run_id }}|{{ v.run_record_offset }}"
+              data-run-id="{{ v.run_id }}"
+              data-offset="{{ v.run_record_offset }}"
+              data-ts="{{ v.run_timestamp }}"
+            />
+          </td>
+          {% for col in columns %}
+          {% if col == "run_id" %}
+          <td>
+            <a
+              href="{{ url_for('main.record', timdex_record_id=timdex_record_id, run_id=v.run_id, run_record_offset=v.run_record_offset) }}"
+              >{{ v[col] }}</a
+            >
+          </td>
+          {% else %}
+          <td>{{ v[col] if v[col] is not none else "" }}</td>
+          {% endif %}
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <section class="diff" id="diff" style="display: none">
+      <h2>Diff <span id="diff-status" class="diff-meta"></span></h2>
+      <div class="diff-target">
+        <h3>Source</h3>
+        <div class="diff-meta" id="source-meta"></div>
+        <div id="source-diff"></div>
+      </div>
+      <div class="diff-target">
+        <h3>Transformed</h3>
+        <div class="diff-meta" id="transformed-meta"></div>
+        <div id="transformed-diff"></div>
+      </div>
+    </section>
+
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.datatables.net/2.1.8/js/dataTables.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/diff@5.2.0/dist/diff.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/diff2html@3.4.52/bundles/js/diff2html.min.js"></script>
+    <script>
+      // Base URL for this record (/record/<id>); append /<run_id>/<offset>[...]
+      const VERSIONS_URL =
+        "{{ url_for('main.record_versions', timdex_record_id=timdex_record_id) }}";
+      const payloadsUrl = (runId, offset) =>
+        `${VERSIONS_URL}/${encodeURIComponent(runId)}/${encodeURIComponent(offset)}/payloads`;
+
+      const table = new DataTable("#versions", {
+        // Column 0 is the checkbox; run_timestamp is column 1.
+        columnDefs: [{ orderable: false, searchable: false, targets: 0 }],
+        order: [[1, "desc"]],
+        pageLength: 25,
+        lengthMenu: [10, 25, 50, 100],
+      });
+
+      // Selection is tracked by composite key so it survives sort/paging redraws.
+      const selected = new Map();
+
+      function refreshCheckboxes() {
+        const atMax = selected.size >= 2;
+        document.querySelectorAll("#versions .vsel").forEach((cb) => {
+          cb.checked = selected.has(cb.dataset.key);
+          cb.disabled = atMax && !cb.checked;
+        });
+      }
+
+      document
+        .querySelector("#versions")
+        .addEventListener("change", (e) => {
+          const cb = e.target;
+          if (!cb.classList.contains("vsel")) return;
+          if (cb.checked) {
+            if (selected.size >= 2) {
+              cb.checked = false;
+              return;
+            }
+            selected.set(cb.dataset.key, {
+              runId: cb.dataset.runId,
+              offset: cb.dataset.offset,
+              ts: cb.dataset.ts,
+            });
+          } else {
+            selected.delete(cb.dataset.key);
+          }
+          refreshCheckboxes();
+          renderDiff();
+        });
+
+      // Reapply selection state after DataTables redraws the table body.
+      table.on("draw", refreshCheckboxes);
+
+      function buildDiff(elId, metaId, t1, t2, older, newer) {
+        document.getElementById(metaId).textContent =
+          `${older.runId} @ ${older.offset}  →  ${newer.runId} @ ${newer.offset}`;
+        const patch = Diff.createTwoFilesPatch(
+          "older",
+          "newer",
+          t1 || "",
+          t2 || "",
+          "",
+          "",
+        );
+        document.getElementById(elId).innerHTML = Diff2Html.html(patch, {
+          drawFileList: false,
+          matching: "lines",
+          outputFormat: "side-by-side",
+        });
+      }
+
+      async function renderDiff() {
+        const diffEl = document.getElementById("diff");
+        if (selected.size !== 2) {
+          diffEl.style.display = "none";
+          return;
+        }
+        // Older version on the left, newer on the right.
+        const [older, newer] = [...selected.values()].sort((a, b) =>
+          a.ts < b.ts ? -1 : 1,
+        );
+        diffEl.style.display = "";
+        document.getElementById("diff-status").textContent = "loading…";
+        try {
+          const [a, b] = await Promise.all([
+            fetch(payloadsUrl(older.runId, older.offset)).then((r) => r.json()),
+            fetch(payloadsUrl(newer.runId, newer.offset)).then((r) => r.json()),
+          ]);
+          document.getElementById("diff-status").textContent = "";
+          buildDiff("source-diff", "source-meta", a.source, b.source, older, newer);
+          buildDiff(
+            "transformed-diff",
+            "transformed-meta",
+            a.transformed,
+            b.transformed,
+            older,
+            newer,
+          );
+        } catch (err) {
+          document.getElementById("diff-status").textContent =
+            "failed to load payloads";
+          console.error(err);
+        }
+      }
+    </script>
+  </body>
+</html>
