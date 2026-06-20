@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Timmy &mdash; Object for value</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.datatables.net/2.1.8/css/dataTables.dataTables.min.css"
+    />
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 2rem auto;
+        width: 90%;
+      }
+      a.back {
+        font-size: 0.85rem;
+      }
+      h1 {
+        font-size: 1.3rem;
+      }
+      h1 code,
+      p.lead code {
+        font-size: 1.1rem;
+        background: #f3f3f3;
+        padding: 0.1rem 0.4rem;
+        border-radius: 4px;
+      }
+      p.lead {
+        font-size: 0.85rem;
+        color: #555;
+      }
+      table#object th,
+      table#object td {
+        font-family: ui-monospace, monospace;
+        font-size: 0.8rem;
+      }
+    </style>
+  </head>
+  <body>
+    <p>
+      <a class="back" href="{{ url_for('analysis.values', analysis_id=analysis_id, prefix=path) }}">&larr; Back to values for {{ path }}</a>
+      &nbsp;&middot;&nbsp;
+      <a class="back" href="{{ url_for('analysis.detail', analysis_id=analysis_id) }}">Analysis</a>
+    </p>
+    <h1>
+      {% if value is none %}
+      All <code>{{ object_prefix or path }}</code> objects
+      {% else %}
+      <code>{{ object_prefix or path }}</code> objects where
+      <code>{{ path }}</code> = <code>{{ value }}</code>
+      {% endif %}
+    </h1>
+    <p class="lead">
+      One row per object instance{% if value is not none %} that carries the
+      matched value{% endif %}, with its member fields as columns. Multi-valued
+      fields are joined with <code>&nbsp;|&nbsp;</code>.
+    </p>
+
+    <table id="object" class="display" style="width: 100%">
+      <thead>
+        <tr>
+          <th>record</th>
+          {% for col in columns %}
+          <th>{{ col.label }}</th>
+          {% endfor %}
+        </tr>
+      </thead>
+    </table>
+
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.datatables.net/2.1.8/js/dataTables.min.js"></script>
+    <script>
+      const PATH = {{ path | tojson }};
+      const VALUE = {{ value | tojson }};
+      const COLUMNS = {{ columns | tojson }}; // [{key,label,path}, ...]
+      // Base for record links: /record/<id>/<run_id>/<offset> (exact version).
+      const RECORD_BASE =
+        "{{ url_for('main.records') }}".replace(/records$/, "record/");
+
+      function recordHref(id, runId, offset) {
+        return (
+          RECORD_BASE +
+          encodeURIComponent(id) +
+          "/" +
+          encodeURIComponent(runId) +
+          "/" +
+          encodeURIComponent(offset)
+        );
+      }
+
+      const columns = [
+        {
+          data: "timdex_record_id",
+          render: function (data, type, row) {
+            if (type !== "display" || data === null) return data;
+            const a = document.createElement("a");
+            a.href = recordHref(data, row.run_id, row.run_record_offset);
+            a.textContent = data;
+            return a.outerHTML;
+          },
+        },
+      ];
+      for (const col of COLUMNS) {
+        columns.push({ data: col.key, defaultContent: "" });
+      }
+
+      new DataTable("#object", {
+        serverSide: true,
+        processing: true,
+        ajax: {
+          url: "{{ url_for('analysis.object_data', analysis_id=analysis_id) }}",
+          data: function (d) {
+            d.path = PATH;
+            // Only send `value` for the filtered view. When unfiltered VALUE is
+            // null; omitting the param (vs sending an empty string) is what tells
+            // the server "all objects" rather than "value = ''".
+            if (VALUE !== null) d.value = VALUE;
+          },
+        },
+        orderMulti: false,
+        order: [[0, "asc"]],
+        pageLength: 25,
+        lengthMenu: [10, 25, 50, 100],
+        columns: columns,
+      });
+    </script>
+  </body>
+</html>

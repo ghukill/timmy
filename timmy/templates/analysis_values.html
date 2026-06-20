@@ -35,6 +35,20 @@
         font-family: ui-monospace, monospace;
         font-size: 0.8rem;
       }
+      a.objlink {
+        font-family: system-ui, sans-serif;
+        font-size: 0.7rem;
+        margin-left: 0.5rem;
+        padding: 0.02rem 0.35rem;
+        border: 1px solid #c9b8e8;
+        border-radius: 999px;
+        color: #6b3fb3;
+        text-decoration: none;
+        white-space: nowrap;
+      }
+      a.objlink:hover {
+        background: #f1ebfa;
+      }
     </style>
   </head>
   <body>
@@ -49,8 +63,21 @@
       with the value; <code>occurrences</code> = total times it appears;
       <code>% of path</code> = the value's share of that path's values (low for
       free text, high for controlled vocabulary). Click a value to see the
-      records that carry it.
+      records that carry it. When the path belongs to a complex (object) field,
+      an <span class="objlink">object</span> link opens the holistic parent
+      object with all its member fields, e.g. <code>kind</code> +
+      <code>value</code>.
     </p>
+
+    {% if object_prefix %}
+    <p>
+      <a
+        class="objlink"
+        href="{{ url_for('analysis.object_page', analysis_id=analysis_id, path=prefix) }}"
+        >view all <code>{{ object_prefix }}</code> objects (unfiltered)</a
+      >
+    </p>
+    {% endif %}
 
     <table id="values" class="display" style="width: 100%">
       <thead>
@@ -68,10 +95,14 @@
       const PREFIX = {{ prefix | tojson }};
       const RECORDS_DRILL =
         "{{ url_for('analysis.value_records_page', analysis_id=analysis_id) }}";
+      const OBJECT_DRILL =
+        "{{ url_for('analysis.object_page', analysis_id=analysis_id) }}";
+      // Paths whose parent is a complex (object) field -> offer an object drill.
+      const OBJECT_PATHS = new Set({{ object_paths | tojson }});
 
-      function valueDrillHref(path, value) {
+      function drillHref(base, path, value) {
         return (
-          RECORDS_DRILL +
+          base +
           "?path=" +
           encodeURIComponent(path) +
           "&value=" +
@@ -96,13 +127,23 @@
           { data: "path" },
           {
             data: "value",
-            // Click a value -> records carrying it (at this row's path).
+            // Click a value -> records carrying it; for object fields, also a
+            // chip linking to the holistic parent object.
             render: function (data, type, row) {
               if (type !== "display" || data === null) return data;
+              const wrap = document.createElement("span");
               const a = document.createElement("a");
-              a.href = valueDrillHref(row.path, data);
+              a.href = drillHref(RECORDS_DRILL, row.path, data);
               a.textContent = data; // textContent escapes the value
-              return a.outerHTML;
+              wrap.appendChild(a);
+              if (OBJECT_PATHS.has(row.path)) {
+                const obj = document.createElement("a");
+                obj.href = drillHref(OBJECT_DRILL, row.path, data);
+                obj.textContent = "object";
+                obj.className = "objlink";
+                wrap.appendChild(obj);
+              }
+              return wrap.outerHTML;
             },
           },
           { data: "documents" },

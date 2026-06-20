@@ -32,7 +32,12 @@ from flask import (
 
 from timmy import analysis
 from timmy.dataset import dataset_lock, get_app_dataset
-from timmy.main import IN_FILTER_COLUMNS, SEARCHABLE_COLUMNS, _split_csv
+from timmy.main import (
+    IN_FILTER_COLUMNS,
+    SEARCHABLE_COLUMNS,
+    _record_limit,
+    _split_csv,
+)
 
 analysis_bp = Blueprint("analysis", __name__, url_prefix="/analysis")
 
@@ -111,7 +116,9 @@ def _tda_filter_from_request(values) -> tuple[str | None, dict[str, Any]]:
     return where, filters
 
 
-def _label_from(where: str | None, filters: dict[str, Any]) -> str:
+def _label_from(
+    where: str | None, filters: dict[str, Any], limit: int | None = None
+) -> str:
     """A short human label for the analysis, derived from its filter."""
     parts = [
         f"{key}={','.join(val) if isinstance(val, list) else val}"
@@ -119,6 +126,8 @@ def _label_from(where: str | None, filters: dict[str, Any]) -> str:
     ]
     if where:
         parts.append("custom where")
+    if limit is not None:
+        parts.append(f"limit={limit}")
     return "; ".join(parts) if parts else "all current records"
 
 
@@ -147,7 +156,8 @@ def build():
     connection, so the build runs under ``dataset_lock``.
     """
     where, filters = _tda_filter_from_request(request.values)
-    label = _label_from(where, filters)
+    limit = _record_limit(request.values)
+    label = _label_from(where, filters, limit)
     name = request.values.get("name", default="", type=str).strip() or None
     notes = request.values.get("notes", default="", type=str).strip() or None
     try:
@@ -156,6 +166,7 @@ def build():
                 get_app_dataset(),
                 _analyses_dir(),
                 where=where,
+                limit=limit,
                 label=label,
                 name=name,
                 notes=notes,
@@ -198,8 +209,32 @@ def detail(analysis_id: str) -> str:
         abort(404)
     try:
         report = analysis.field_usage(conn)
+        # Surface each complex (object) field as a single navigational parent row
+        # (e.g. dates[]) that links to its object view, sorted in among its member
+        # leaves. This replaces per-member "object" chips with one row per object.
+        total = manifest.get("doc_count") or 0
+        for summary in analysis.object_field_summaries(conn):
+            prefix = summary["object_prefix"]
+            report.append(
+                {
+                    "path": prefix,
+                    "is_object": True,
+                    "value_type": "object",
+                    "doc_count": summary["doc_count"],
+                    "coverage_pct": (
+                        round(100 * summary["doc_count"] / total, 1) if total else 0.0
+                    ),
+                    "distinct_values": summary["instance_count"],
+                    "value_count": summary["instance_count"],
+                    "pct_unique": None,
+                    "sample_value": ", ".join(
+                        _member_label(m, prefix) for m in summary["members"]
+                    ),
+                }
+            )
     finally:
         conn.close()
+    report.sort(key=lambda r: r["path"])
     return render_template(
         "analysis_detail.html",
         analysis_id=analysis_id,
@@ -273,11 +308,28 @@ def _table_data(analysis_id: str, columns: list[str], runner):
 def values(analysis_id: str) -> str:
     """Path-scoped value table: distinct values for every path under a prefix."""
     _check_analysis_id(analysis_id)
+    prefix = request.args.get("prefix", default="", type=str)
+    try:
+        conn = analysis.open_analysis(_analyses_dir(), analysis_id, read_only=True)
+    except FileNotFoundError:
+        abort(404)
+    try:
+        # Paths whose parent is a complex (object) field get an "object" drill.
+        object_path_set = analysis.object_field_paths(conn)
+    finally:
+        conn.close()
+    # When the page is scoped to one member path of an object field, offer a link
+    # to that whole object unfiltered (every instance, not one value at a time).
+    object_prefix = (
+        _collapsed_object_prefix(prefix) if prefix in object_path_set else None
+    )
     return render_template(
         "analysis_values.html",
         analysis_id=analysis_id,
-        prefix=request.args.get("prefix", default="", type=str),
+        prefix=prefix,
         columns=analysis.PATH_VALUE_COLUMNS,
+        object_paths=sorted(object_path_set),
+        object_prefix=object_prefix,
     )
 
 
@@ -291,6 +343,110 @@ def values_data(analysis_id: str):
         lambda conn, search, oc, od, limit, offset: analysis.path_values(
             conn, prefix, search=search, order_col=oc, order_dir=od,
             limit=limit, offset=offset,
+        ),
+    )
+
+
+def _collapsed_object_prefix(path: str) -> str:
+    """Collapsed array-element prefix of a path: keep up to the last ``]``.
+
+    ``subjects[].kind`` -> ``subjects[]``; a path with no ``]`` has no object.
+    """
+    idx = path.rfind("]")
+    return path[: idx + 1] if idx != -1 else ""
+
+
+def _member_label(member_path: str, object_prefix: str) -> str:
+    """Object-relative label for a member field, e.g. ``subjects[].value[]`` ->
+    ``value[]`` under prefix ``subjects[]``. Falls back to the full path."""
+    if object_prefix and member_path.startswith(object_prefix):
+        return member_path[len(object_prefix):].lstrip(".") or member_path
+    return member_path
+
+
+def _object_request() -> tuple[str, str, str | None]:
+    """Parse the object-drill request into ``(object_prefix, path, value)``.
+
+    ``path`` is a member path (e.g. ``dates[].kind``); ``object_prefix`` is its
+    collapsed parent (``dates[]``). An absent ``value`` means the unfiltered view
+    (every object instance under the prefix), so ``None`` is preserved -- distinct
+    from a present-but-empty value.
+    """
+    path = request.args.get("path", default="", type=str)
+    value = request.args.get("value", default=None, type=str)
+    return _collapsed_object_prefix(path), path, value
+
+
+def _object_columns(
+    conn, object_prefix: str, path: str, value: str | None
+) -> tuple[list[str], list[dict]]:
+    """(member_paths, display columns) for the object table under ``object_prefix``.
+
+    ``columns`` carry the ``c{i}`` data key, the object-relative ``label``, and the
+    underlying ``path``; ordered deterministically so page + data endpoint agree.
+    """
+    member_paths = analysis.object_columns(
+        conn, object_prefix, value_path=path, value=value
+    )
+    columns = [
+        {"key": f"c{i}", "label": _member_label(mp, object_prefix), "path": mp}
+        for i, mp in enumerate(member_paths)
+    ]
+    return member_paths, columns
+
+
+@analysis_bp.get("/<analysis_id>/object")
+def object_page(analysis_id: str) -> str:
+    """Parent-object drill: object instances under a complex field, pivoted.
+
+    One row per object instance (e.g. each ``subjects[X]``) with its member fields
+    as columns -- the holistic parent object, not just one matched leaf. Scoped to
+    a ``value`` when given, otherwise every instance under the field.
+    """
+    _check_analysis_id(analysis_id)
+    object_prefix, path, value = _object_request()
+    try:
+        conn = analysis.open_analysis(_analyses_dir(), analysis_id, read_only=True)
+    except FileNotFoundError:
+        abort(404)
+    try:
+        _, columns = _object_columns(conn, object_prefix, path, value)
+    finally:
+        conn.close()
+    return render_template(
+        "analysis_object.html",
+        analysis_id=analysis_id,
+        path=path,
+        value=value,
+        object_prefix=object_prefix,
+        columns=columns,
+    )
+
+
+@analysis_bp.get("/<analysis_id>/object/data")
+def object_data(analysis_id: str):
+    """DataTables server-side endpoint for the parent-object drill."""
+    _check_analysis_id(analysis_id)
+    object_prefix, path, value = _object_request()
+    # Recompute member columns (deterministic order -> matches the page) so the
+    # order-by whitelist and the SQL pivot stay in lockstep.
+    try:
+        conn = analysis.open_analysis(_analyses_dir(), analysis_id, read_only=True)
+    except FileNotFoundError:
+        abort(404)
+    try:
+        member_paths = analysis.object_columns(
+            conn, object_prefix, value_path=path, value=value
+        )
+    finally:
+        conn.close()
+    display_cols = ["timdex_record_id"] + [f"c{i}" for i in range(len(member_paths))]
+    return _table_data(
+        analysis_id,
+        display_cols,
+        lambda conn, search, oc, od, limit, offset: analysis.object_rows(
+            conn, object_prefix, member_paths, value_path=path, value=value,
+            search=search, order_col=oc, order_dir=od, limit=limit, offset=offset,
         ),
     )
 

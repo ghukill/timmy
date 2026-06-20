@@ -163,6 +163,18 @@
       table.report tr.full td {
         background: #eafaef;
       }
+      /* Parent-object field rows (e.g. dates[]) link to the object view. */
+      a.obj-field {
+        color: #6b3fb3;
+        font-weight: 600;
+      }
+      a.obj-field::after {
+        content: " \25B8 objects";
+        font-family: system-ui, sans-serif;
+        font-size: 0.7rem;
+        font-weight: 400;
+        color: #9b7fd0;
+      }
       .cov {
         display: flex;
         align-items: center;
@@ -282,10 +294,22 @@
             {% for f in report %}
             <tr class="{{ 'full' if f.coverage_pct == 100 else '' }}">
               <td>
+                {% if f.is_object %}
+                <a
+                  class="obj-field"
+                  title="View all {{ f.path }} objects"
+                  href="{{ url_for('analysis.object_page', analysis_id=analysis_id, path=f.path) }}"
+                  >{{ f.path }}</a
+                >
+                {% else %}
                 <a href="{{ url_for('analysis.values', analysis_id=analysis_id, prefix=f.path) }}">{{ f.path }}</a>
+                {% endif %}
               </td>
               <td>{{ f.value_type }}</td>
-              <td data-order="{{ f.coverage_pct }}">
+              {# Nudge a parent object's sort value just above its tied children
+                 (its coverage is always >= theirs) so it sorts first on a tie,
+                 without changing the displayed 0.1%-rounded percentage. #}
+              <td data-order="{{ (f.coverage_pct + 0.01) | round(2) if f.is_object else f.coverage_pct }}">
                 <div class="cov">
                   <div class="cov-bar">
                     <div class="cov-fill" style="width: {{ f.coverage_pct }}%"></div>
@@ -392,16 +416,16 @@
           "from eav e join docs d using (timdex_composite_id)\n" +
           "where e.path = 'contributors[].value'\n" +
           "limit 100;",
-        "Sibling value by kind":
-          "-- Sibling lookup: for records where dates[].kind = 'Publication date',\n" +
-          "-- show the value from the SAME array element (dates[X]). EAV leaves are\n" +
-          "-- tethered only by sharing an array index inside path_indexed.\n" +
+        "Object member by kind":
+          "-- Parent object lookup: for records where dates[].kind = 'Publication\n" +
+          "-- date', show the value member from the SAME object instance (dates[X]).\n" +
+          "-- EAV leaves are tethered only by sharing an array index in path_indexed.\n" +
           "--\n" +
           "-- To adapt this to another field, change these three things:\n" +
           "--   1. the kind path + value in the WHERE:  dates[].kind / 'Publication date'\n" +
-          "--   2. the sibling value path:              dates[].value\n" +
+          "--   2. the member value path:               dates[].value\n" +
           "--   3. the leaf names in the join below:    '.kind' and '.value'\n" +
-          "select d.timdex_record_id, v.value as sibling_value\n" +
+          "select d.timdex_record_id, v.value as member_value\n" +
           "from eav k\n" +
           "join eav v\n" +
           "  on  v.timdex_composite_id = k.timdex_composite_id\n" +

@@ -105,6 +105,16 @@ def _split_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _record_limit(args) -> int | None:
+    """Parse the optional ``f_limit`` cap. Returns a positive int, else ``None``.
+
+    Shared by the browse view and the analysis build so a single filter value
+    bounds both the on-screen corpus and what TDA reads for an analysis.
+    """
+    limit = args.get("f_limit", default=0, type=int)
+    return limit if limit and limit > 0 else None
+
+
 def _build_where(args) -> tuple[str, list]:
     """Build the WHERE clause (and its params) from search + filter inputs.
 
@@ -169,6 +179,10 @@ def records_data():
     order_dir = "desc" if request.args.get("order[0][dir]") == "desc" else "asc"
 
     where_sql, params = _build_where(request.args)
+    # Optional cap on the matched corpus (maps to TDA's read `limit`). It bounds
+    # the filtered count and the page slice so the browse mirrors exactly what an
+    # analysis built from this filter would read.
+    record_limit = _record_limit(request.args)
     columns_sql = ", ".join(
         f"{SELECT_EXPRESSIONS[col]} as {col}" if col in SELECT_EXPRESSIONS else col
         for col in RECORD_COLUMNS
@@ -183,12 +197,23 @@ def records_data():
                 f"select count(*) from {RECORDS_TABLE}{where_sql}",  # noqa: S608
                 params,
             ).fetchone()[0]
-            page_query = (
-                f"select {columns_sql} from {RECORDS_TABLE}{where_sql} "  # noqa: S608
-                f"order by {order_col} {order_dir} "
-                f"limit ? offset ?"
-            )
-            rows = conn.execute(page_query, [*params, length, start]).fetchall()
+            if record_limit is not None:
+                records_filtered = min(records_filtered, record_limit)
+            # Never serve a page that reaches past the cap.
+            page_length = length
+            if record_limit is not None:
+                page_length = min(length, max(record_limit - start, 0))
+            if page_length <= 0:
+                rows = []
+            else:
+                page_query = (
+                    f"select {columns_sql} from {RECORDS_TABLE}{where_sql} "  # noqa: S608
+                    f"order by {order_col} {order_dir} "
+                    f"limit ? offset ?"
+                )
+                rows = conn.execute(
+                    page_query, [*params, page_length, start]
+                ).fetchall()
     except Exception as exc:  # noqa: BLE001
         # Surfaced inline by DataTables (e.g. an invalid freeform `where`).
         return jsonify(draw=draw, error=str(exc))

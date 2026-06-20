@@ -109,6 +109,7 @@ def build_analysis(
     *,
     where: str | None = None,
     table: str = DEFAULT_TABLE,
+    limit: int | None = None,
     label: str | None = None,
     name: str | None = None,
     notes: str | None = None,
@@ -118,7 +119,8 @@ def build_analysis(
 
     ``where`` is a raw SQL predicate and ``**filters`` are TDA typed filters
     (e.g. ``source="libguides"``); both are forwarded to TDA's read path and
-    recorded in the manifest. Records with no ``transformed_record`` (e.g. a
+    recorded in the manifest. ``limit`` caps how many records TDA reads (its own
+    ``read_dicts_iter`` limit). Records with no ``transformed_record`` (e.g. a
     current version whose latest action is a delete) contribute nothing and are
     counted under ``skipped_count``.
 
@@ -159,6 +161,7 @@ def build_analysis(
             table=table,
             columns=READ_COLUMNS,
             where=where,
+            limit=limit,
             **filters,
         ):
             payload = rec.get("transformed_record")
@@ -291,6 +294,249 @@ PATH_VALUE_COLUMNS = ["path", "value", "documents", "occurrences", "pct_of_path"
 
 # Columns for the value -> records drill (server-side paginated).
 VALUE_RECORD_COLUMNS = ["timdex_record_id", "source", "run_id", "run_record_offset"]
+
+# Identity columns carried alongside the dynamic member-field columns in the
+# object table (the first is rendered as a link to the record).
+OBJECT_IDENTITY_COLUMNS = ["timdex_record_id", "run_id", "run_record_offset"]
+
+# Strip everything after the last ``]`` to get a leaf's array-element prefix:
+# ``subjects[3].kind`` -> ``subjects[3]`` (the object instance it belongs to). The
+# same expression on a collapsed ``path`` yields the collapsed prefix
+# (``subjects[].kind`` -> ``subjects[]``). Leaves with no ``]`` have no parent
+# object.
+_ELEM_EXPR = r"regexp_replace({col}, '\][^\]]*$', ']')"
+
+# A leaf is "in" an object instance when its path_indexed equals the element
+# prefix or is boundary-nested under it (next char is ``.`` or ``[``). This prefix
+# match -- not equality of stripped forms -- is what lets a deeper member field
+# (subjects[3].value[0]) join back to the matched object (subjects[3]); see
+# scratch/ideas.md sec.8.
+def _under_elem(leaf_col: str, elem_col: str) -> str:
+    return (
+        f"({leaf_col} = {elem_col}"
+        f" or starts_with({leaf_col}, {elem_col} || '.')"
+        f" or starts_with({leaf_col}, {elem_col} || '['))"
+    )
+
+
+def _collapsed_prefix(path: str) -> str:
+    """Collapsed array-element prefix of a path: keep up to the last ``]``.
+
+    ``dates[].kind`` -> ``dates[]``; a path with no ``]`` has no parent object.
+    """
+    i = path.rfind("]")
+    return path[: i + 1] if i != -1 else ""
+
+
+def object_field_paths(conn: duckdb.DuckDBPyConnection) -> set[str]:
+    """Collapsed paths that are members of a complex (object) parent field.
+
+    These are the paths worth offering an "object" drill on -- a path qualifies
+    when it shares an array element with some other distinct path, i.e. its parent
+    is a multi-key object (``subjects[].kind`` qualifies because
+    ``subjects[].value[]`` also lives under ``subjects[]``). Computed over the
+    *distinct* paths only (not every row), so it stays cheap regardless of corpus
+    size.
+    """
+    rows = conn.execute(
+        f"""
+        with paths as (select distinct path from eav where path like '%]%'),
+             elems as (select path, {_ELEM_EXPR.format(col="path")} as elem
+                       from paths)
+        select distinct a.path
+        from elems a
+        join paths q
+          on q.path <> a.path and {_under_elem("q.path", "a.elem")}
+        """  # noqa: S608 -- only constant SQL text is interpolated
+    ).fetchall()
+    return {r[0] for r in rows}
+
+
+def _instance_expr(col: str, depth: int) -> str:
+    r"""SQL truncating a ``path_indexed`` to its first ``depth`` array indices.
+
+    ``depth`` is the bracket count of the object prefix; the result is the
+    object-instance key at that level -- ``dates[3].value`` at depth 1 ->
+    ``dates[3]``, and a nested member ``subjects[3].value[0]`` at depth 1 ->
+    ``subjects[3]`` too, so members join to their instance by equality. A path with
+    fewer than ``depth`` brackets fails the match and is returned unchanged, so it
+    can never collide with a real instance key.
+    """
+    return rf"regexp_replace({col}, '^((?:[^\]]*\]){{{depth}}}).*$', '\1')"
+
+
+def _object_hits(
+    object_prefix: str, value_path: str | None, value: str | None
+) -> tuple[str, list]:
+    """(SQL, params) for the ``hits`` CTE: the object instances to profile.
+
+    Filtered (``value_path`` + ``value`` given): instances containing that leaf
+    value. Unfiltered: every instance under ``object_prefix``.
+    """
+    inst = _instance_expr("path_indexed", object_prefix.count("]"))
+    if value_path is not None and value is not None:
+        return (
+            f"select distinct timdex_composite_id, {inst} as elem "  # noqa: S608
+            "from eav where path = ? and value = ?",
+            [value_path, value],
+        )
+    scope_sql, scope_params = _scope_clause(object_prefix)
+    return (
+        f"select distinct timdex_composite_id, {inst} as elem "  # noqa: S608
+        f"from eav where {scope_sql}",
+        list(scope_params),
+    )
+
+
+def object_columns(
+    conn: duckdb.DuckDBPyConnection,
+    object_prefix: str,
+    *,
+    value_path: str | None = None,
+    value: str | None = None,
+) -> list[str]:
+    """Ordered distinct member-field paths of the objects under ``object_prefix``.
+
+    With ``value_path`` + ``value``, scoped to instances carrying that value;
+    otherwise every instance under the prefix (the unfiltered object view). Returns
+    all collapsed leaf paths living in those objects -- the dynamic columns of the
+    object table; ordered by path so the page and data endpoints agree.
+    """
+    leaf_inst = _instance_expr("e.path_indexed", object_prefix.count("]"))
+    hits_sql, hit_params = _object_hits(object_prefix, value_path, value)
+    rows = conn.execute(
+        f"""
+        with hits as ({hits_sql})
+        select distinct e.path
+        from eav e
+        join hits h
+          on e.timdex_composite_id = h.timdex_composite_id
+         and {leaf_inst} = h.elem
+        order by e.path
+        """,  # noqa: S608 -- only constant SQL text is interpolated
+        hit_params,
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def object_rows(
+    conn: duckdb.DuckDBPyConnection,
+    object_prefix: str,
+    member_paths: list[str],
+    *,
+    value_path: str | None = None,
+    value: str | None = None,
+    search: str = "",
+    order_col: str = "timdex_record_id",
+    order_dir: str = "asc",
+    limit: int = 25,
+    offset: int = 0,
+) -> tuple[int, int, list[dict[str, Any]]]:
+    """Pivoted object table: one row per object instance under ``object_prefix``.
+
+    With ``value_path`` + ``value`` the instances are scoped to those carrying that
+    value; otherwise every instance under the prefix. Each ``member_paths`` entry
+    becomes a ``c{i}`` column holding that field's value(s) within the object
+    (multiple leaves -- e.g. ``value[]`` -- joined with `` | ``). Identity columns
+    key each row back to its record version. Returns ``(total, filtered, rows)``.
+    """
+    value_cols = [f"c{i}" for i in range(len(member_paths))]
+    all_cols = OBJECT_IDENTITY_COLUMNS + value_cols
+
+    leaf_inst = _instance_expr("e.path_indexed", object_prefix.count("]"))
+    # One string_agg per member field; the path is bound as a parameter.
+    pivots = ",\n".join(
+        f"string_agg(case when e.path = ? then e.value end, ' | ') as {col}"
+        for col in value_cols
+    )
+    pivot_params = list(member_paths)
+    hits_sql, hit_params = _object_hits(object_prefix, value_path, value)
+
+    base = f"""
+        with hits as ({hits_sql}),
+        elems as (
+            select e.timdex_composite_id, h.elem,
+                   d.timdex_record_id, d.run_id, d.run_record_offset,
+                   {pivots}
+            from eav e
+            join hits h
+              on e.timdex_composite_id = h.timdex_composite_id
+             and {leaf_inst} = h.elem
+            join docs d on d.timdex_composite_id = e.timdex_composite_id
+            group by e.timdex_composite_id, h.elem,
+                     d.timdex_record_id, d.run_id, d.run_record_offset
+        )
+        select {", ".join(all_cols)} from elems
+    """  # noqa: S608 -- columns are constant; the prefix/value are parameters
+    # Param order follows the SQL text: hits params first, then each pivot path.
+    base_params = [*hit_params, *pivot_params]
+
+    total = conn.execute(
+        f"select count(*) from ({base})", base_params  # noqa: S608
+    ).fetchone()[0]
+
+    params = list(base_params)
+    search_sql = ""
+    if search:
+        cols_for_search = ["timdex_record_id", *value_cols]
+        ors = " or ".join(f"{c} ilike ?" for c in cols_for_search)
+        search_sql = f" where {ors}"
+        params += [f"%{search}%"] * len(cols_for_search)
+    filtered = conn.execute(
+        f"select count(*) from ({base}){search_sql}", params  # noqa: S608
+    ).fetchone()[0]
+
+    if order_col not in all_cols:
+        order_col = "timdex_record_id"
+    direction = "desc" if order_dir == "desc" else "asc"
+    rows = conn.execute(
+        f"select * from ({base}){search_sql} "  # noqa: S608
+        # secondary sort by element keeps a record's elements grouped together
+        f"order by {order_col} {direction}, timdex_record_id, run_record_offset "
+        f"limit ? offset ?",
+        [*params, limit, offset],
+    ).fetchall()
+    return (
+        total,
+        filtered,
+        [dict(zip(all_cols, r, strict=True)) for r in rows],
+    )
+
+
+def object_field_summaries(
+    conn: duckdb.DuckDBPyConnection,
+) -> list[dict[str, Any]]:
+    """One summary per complex (object) field, for the field-usage report.
+
+    Each entry is a navigational parent -- the collapsed object prefix (e.g.
+    ``dates[]``), how many docs carry it, how many object instances exist, and its
+    member-field paths -- so the report can surface the whole object as a single
+    clickable row above its member leaves.
+    """
+    prefixes = sorted({_collapsed_prefix(p) for p in object_field_paths(conn)})
+    summaries = []
+    for prefix in prefixes:
+        scope_sql, scope_params = _scope_clause(prefix)
+        inst = _instance_expr("path_indexed", prefix.count("]"))
+        doc_count = conn.execute(
+            f"select count(distinct timdex_composite_id) from eav "  # noqa: S608
+            f"where {scope_sql}",
+            scope_params,
+        ).fetchone()[0]
+        instance_count = conn.execute(
+            f"select count(*) from (select distinct timdex_composite_id, "  # noqa: S608
+            f"{inst} as elem from eav where {scope_sql})",
+            scope_params,
+        ).fetchone()[0]
+        summaries.append(
+            {
+                "object_prefix": prefix,
+                "doc_count": doc_count,
+                "instance_count": instance_count,
+                "members": object_columns(conn, prefix),
+            }
+        )
+    return summaries
 
 
 def _scope_clause(prefix: str) -> tuple[str, list]:
