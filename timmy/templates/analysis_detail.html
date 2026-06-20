@@ -139,14 +139,9 @@
         font-style: italic;
       }
       .report-wrap {
-        max-height: 520px;
-        overflow: auto;
-        border: 1px solid #eee;
-        border-radius: 4px;
         margin-top: 0.75rem;
       }
       table.report {
-        border-collapse: collapse;
         width: 100%;
         font-size: 0.8rem;
       }
@@ -154,16 +149,11 @@
       table.report td {
         text-align: left;
         padding: 0.3rem 0.55rem;
-        border-bottom: 1px solid #eee;
         font-family: ui-monospace, monospace;
         vertical-align: middle;
       }
       table.report th {
-        border-bottom: 1px solid #ccc;
         color: #444;
-        position: sticky;
-        top: 0;
-        background: #fff;
       }
       table.report th.num,
       table.report td.num {
@@ -277,13 +267,14 @@
       <p class="empty">No fields &mdash; this corpus produced no flattened rows.</p>
       {% else %}
       <div class="report-wrap">
-        <table class="report">
+        <table class="report" id="report" style="width: 100%">
           <thead>
             <tr>
               <th>path</th>
               <th>type</th>
               <th>coverage</th>
               <th class="num">distinct values</th>
+              <th class="num">% unique</th>
               <th>sample</th>
             </tr>
           </thead>
@@ -294,7 +285,7 @@
                 <a href="{{ url_for('analysis.values', analysis_id=analysis_id, prefix=f.path) }}">{{ f.path }}</a>
               </td>
               <td>{{ f.value_type }}</td>
-              <td>
+              <td data-order="{{ f.coverage_pct }}">
                 <div class="cov">
                   <div class="cov-bar">
                     <div class="cov-fill" style="width: {{ f.coverage_pct }}%"></div>
@@ -303,9 +294,11 @@
                   <span class="cov-count">{{ f.doc_count }}/{{ manifest.doc_count }}</span>
                 </div>
               </td>
-              <td class="num">
+              <td class="num" data-order="{{ f.distinct_values }}">
                 {{ "{:,}".format(f.distinct_values) }}
-                {% if f.pct_unique is not none %}<span class="pct-unique">· {{ f.pct_unique }}% uniq</span>{% endif %}
+              </td>
+              <td class="num" data-order="{{ f.pct_unique if f.pct_unique is not none else -1 }}">
+                {% if f.pct_unique is not none %}{{ f.pct_unique }}%{% endif %}
               </td>
               <td class="sample" title="{{ f.sample_value if f.sample_value is not none else '' }}">
                 {{ f.sample_value if f.sample_value is not none else "" }}
@@ -344,6 +337,18 @@
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
     <script src="https://cdn.datatables.net/2.1.8/js/dataTables.min.js"></script>
     <script>
+      // Make the field-usage report searchable + sortable (client-side). Numeric
+      // columns sort by their data-order value, not rendered text; row classes
+      // (the green 100%-coverage tint) are preserved across sort/paging.
+      if (document.getElementById("report")) {
+        new DataTable("#report", {
+          order: [[2, "desc"]], // coverage desc (the default at-a-glance view)
+          pageLength: 25,
+          lengthMenu: [10, 25, 50, 100],
+          columnDefs: [{ targets: 5, orderable: false }], // sample
+        });
+      }
+
       const QUERY_URL = "{{ url_for('analysis.query', analysis_id=analysis_id) }}";
       // Base for record drill-through links: /record/<id>/<run_id>/<offset>.
       const RECORD_BASE =
@@ -386,6 +391,26 @@
           "       d.source, e.value\n" +
           "from eav e join docs d using (timdex_composite_id)\n" +
           "where e.path = 'contributors[].value'\n" +
+          "limit 100;",
+        "Sibling value by kind":
+          "-- Sibling lookup: for records where dates[].kind = 'Publication date',\n" +
+          "-- show the value from the SAME array element (dates[X]). EAV leaves are\n" +
+          "-- tethered only by sharing an array index inside path_indexed.\n" +
+          "--\n" +
+          "-- To adapt this to another field, change these three things:\n" +
+          "--   1. the kind path + value in the WHERE:  dates[].kind / 'Publication date'\n" +
+          "--   2. the sibling value path:              dates[].value\n" +
+          "--   3. the leaf names in the join below:    '.kind' and '.value'\n" +
+          "select d.timdex_record_id, v.value as sibling_value\n" +
+          "from eav k\n" +
+          "join eav v\n" +
+          "  on  v.timdex_composite_id = k.timdex_composite_id\n" +
+          "  and v.path = 'dates[].value'\n" +
+          "  -- same element: strip the '.kind' leaf off path_indexed, add '.value'\n" +
+          "  and v.path_indexed =\n" +
+          "        left(k.path_indexed, length(k.path_indexed) - length('.kind')) || '.value'\n" +
+          "join docs d on d.timdex_composite_id = k.timdex_composite_id\n" +
+          "where k.path = 'dates[].kind' and k.value = 'Publication date'\n" +
           "limit 100;",
       };
 
