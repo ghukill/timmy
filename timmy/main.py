@@ -1,7 +1,7 @@
 from flask import Blueprint, abort, jsonify, render_template, request
 
 from timmy.dataset import dataset_lock, get_app_dataset
-from timmy.sources import get_source_record_format, prettify
+from timmy.sources import extract_timdex_fields, get_source_record_format, prettify
 
 main = Blueprint("main", __name__)
 
@@ -296,10 +296,13 @@ def _render_record_detail(
         abort(404, description="No record found for that key.")
 
     source_format = get_source_record_format(rec["source"])
+    timdex_fields = extract_timdex_fields(rec.get("transformed_record"))
     return render_template(
         "record.html",
         rec=rec,
         metadata_columns=RECORD_METADATA_COLUMNS,
+        timdex_title=timdex_fields["title"],
+        timdex_source_link=timdex_fields["source_link"],
         source_format=source_format,
         source_pretty=prettify(rec.get("source_record"), source_format),
         transformed_pretty=prettify(rec.get("transformed_record"), "json"),

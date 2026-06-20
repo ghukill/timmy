@@ -89,6 +89,7 @@
     </style>
   </head>
   <body>
+    {% include "_nav.html" %}
     <p>
       <a class="back" href="{{ url_for('main.records') }}">&larr; Back to records</a>
       &nbsp;&middot;&nbsp;
@@ -106,6 +107,18 @@
             <td>{{ rec[col] if rec[col] is not none else "" }}</td>
           </tr>
           {% endfor %}
+          {% if timdex_title %}
+          <tr>
+            <th>timdex.title</th>
+            <td>{{ timdex_title }}</td>
+          </tr>
+          {% endif %}
+          {% if timdex_source_link %}
+          <tr>
+            <th>timdex.source_link</th>
+            <td><a href="{{ timdex_source_link }}" target="_blank" rel="noopener noreferrer">{{ timdex_source_link }}</a></td>
+          </tr>
+          {% endif %}
         </tbody>
       </table>
     </section>

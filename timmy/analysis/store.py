@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import duckdb
+import pyarrow as pa
 
 from timmy.analysis.flatten import flatten, make_timdex_composite_id
 
@@ -56,7 +57,63 @@ DEFAULT_TABLE = "current_records"
 EXCLUDED_FIELDS = frozenset({"timdex_provenance"})
 
 # Rows are flushed to the analysis DB every this many docs to bound memory.
+# A flush turns the buffered rows into an Arrow table and bulk-inserts it, so
+# this also caps how many rows are held in Python at once (essential at the
+# multi-million-record scale: EAV fans out to ~tens of rows per doc).
 BUILD_FLUSH_EVERY = 2000
+
+# Arrow schemas mirroring the `docs`/`eav` SQL tables. Rows are buffered as
+# tuples, then pivoted into an Arrow table per flush and bulk-loaded via
+# `register` + `insert ... select` -- ~200x faster than row-at-a-time
+# `executemany` (see scratch/ideas.md "Analysis build performance"). Explicit
+# types keep `run_record_offset` a bigint and let `value` carry nulls.
+DOCS_ARROW_SCHEMA = pa.schema(
+    [
+        ("timdex_composite_id", pa.string()),
+        ("source", pa.string()),
+        ("timdex_record_id", pa.string()),
+        ("run_id", pa.string()),
+        ("run_record_offset", pa.int64()),
+    ]
+)
+EAV_ARROW_SCHEMA = pa.schema(
+    [
+        ("timdex_composite_id", pa.string()),
+        ("path", pa.string()),
+        ("path_indexed", pa.string()),
+        ("value", pa.string()),
+        ("value_type", pa.string()),
+    ]
+)
+
+
+def _bulk_insert(
+    con: duckdb.DuckDBPyConnection,
+    table: str,
+    schema: pa.Schema,
+    rows: list[tuple],
+) -> None:
+    """Bulk-load buffered row tuples into ``table`` via an Arrow relation.
+
+    Pivots the row tuples into a columnar Arrow table (typed by ``schema``) and
+    inserts it in one shot with ``insert ... select``, which DuckDB ingests far
+    faster than parameterized row inserts. A no-op for an empty buffer.
+    """
+    if not rows:
+        return
+    columns = list(zip(*rows, strict=True))
+    arrow_table = pa.table(
+        {
+            field.name: pa.array(columns[i], type=field.type)
+            for i, field in enumerate(schema)
+        },
+        schema=schema,
+    )
+    con.register("_bulk_batch", arrow_table)
+    try:
+        con.execute(f"insert into {table} select * from _bulk_batch")  # noqa: S608
+    finally:
+        con.unregister("_bulk_batch")
 
 SCHEMA_SQL = """
 create table docs (
@@ -146,16 +203,10 @@ def build_analysis(
         eav_rows: list[tuple] = []
 
         def flush() -> None:
-            if doc_rows:
-                con.executemany(
-                    "insert into docs values (?, ?, ?, ?, ?)", doc_rows
-                )
-                doc_rows.clear()
-            if eav_rows:
-                con.executemany(
-                    "insert into eav values (?, ?, ?, ?, ?)", eav_rows
-                )
-                eav_rows.clear()
+            _bulk_insert(con, "docs", DOCS_ARROW_SCHEMA, doc_rows)
+            doc_rows.clear()
+            _bulk_insert(con, "eav", EAV_ARROW_SCHEMA, eav_rows)
+            eav_rows.clear()
 
         for rec in dataset.records.read_dicts_iter(
             table=table,

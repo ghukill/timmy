@@ -34,6 +34,7 @@
     </style>
   </head>
   <body>
+    {% include "_nav.html" %}
     <p>
       <a class="back" href="{{ url_for('analysis.values', analysis_id=analysis_id, prefix=path) }}">&larr; Back to values for {{ path }}</a>
       &nbsp;&middot;&nbsp;

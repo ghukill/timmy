@@ -1,0 +1,58 @@
+{# Shared sticky app header. Included as the first child of <body> on every
+   page so /records (and the analyses list + home) are always one click away.
+   Self-contained styling: every page sets a 2rem body top-margin, so the bar
+   pulls up to sit flush, then breaks out to full viewport width. #}
+<style>
+  .app-nav {
+    position: sticky;
+    top: 0;
+    z-index: 1000;
+    box-sizing: border-box;
+    width: 100vw;
+    margin-left: calc(50% - 50vw);
+    margin-top: -2rem;
+    margin-bottom: 1.5rem;
+    display: flex;
+    align-items: center;
+    gap: 1.25rem;
+    padding: 0.6rem 2rem;
+    background: #1d2b3a;
+    border-bottom: 1px solid #0f1925;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+    font-family: system-ui, sans-serif;
+  }
+  .app-nav .brand {
+    font-weight: 700;
+    font-size: 0.95rem;
+    letter-spacing: 0.02em;
+    color: #fff;
+    text-decoration: none;
+  }
+  .app-nav a.navlink {
+    font-size: 0.85rem;
+    color: #b9cbe0;
+    text-decoration: none;
+  }
+  .app-nav a.navlink:hover {
+    color: #fff;
+  }
+  .app-nav a.navlink.active {
+    color: #fff;
+    font-weight: 600;
+    border-bottom: 2px solid #7aa7d8;
+    padding-bottom: 1px;
+  }
+</style>
+<nav class="app-nav">
+  <a class="brand" href="{{ url_for('main.index') }}">Timmy</a>
+  <a
+    class="navlink {{ 'active' if request.blueprint == 'main' and request.endpoint != 'main.index' }}"
+    href="{{ url_for('main.records') }}"
+    >Records</a
+  >
+  <a
+    class="navlink {{ 'active' if request.blueprint == 'analysis' }}"
+    href="{{ url_for('analysis.index') }}"
+    >Analyses</a
+  >
+</nav>

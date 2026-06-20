@@ -217,6 +217,7 @@
     </style>
   </head>
   <body>
+    {% include "_nav.html" %}
     <p>
       <a class="back" href="{{ url_for('main.records') }}">&larr; Back to records</a>
       &nbsp;&middot;&nbsp;
@@ -367,8 +368,13 @@
       if (document.getElementById("report")) {
         new DataTable("#report", {
           order: [[2, "desc"]], // coverage desc (the default at-a-glance view)
-          pageLength: 25,
-          lengthMenu: [10, 25, 50, 100],
+          // The field list is bounded (tens of paths), so show every field by
+          // default -- the whole metadata profile at a glance, no paging.
+          pageLength: -1,
+          lengthMenu: [
+            [-1, 100, 50, 25],
+            ["All", 100, 50, 25],
+          ],
           columnDefs: [{ targets: 5, orderable: false }], // sample
         });
       }

@@ -42,6 +42,28 @@ def _to_text(payload: bytes | str | None) -> str:
     return payload
 
 
+def extract_timdex_fields(payload: bytes | str | None) -> dict[str, str | None]:
+    """Pull a few headline fields out of a transformed_record (always JSON).
+
+    Returns ``title`` and ``source_link`` for surfacing in the record detail
+    metadata table. Missing/unparseable payloads yield ``None`` for each field.
+    """
+    text = _to_text(payload).strip()
+    fields: dict[str, str | None] = {"title": None, "source_link": None}
+    if not text:
+        return fields
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return fields
+    if isinstance(data, dict):
+        for key in fields:
+            value = data.get(key)
+            if isinstance(value, str) and value:
+                fields[key] = value
+    return fields
+
+
 def prettify(payload: bytes | str | None, fmt: str) -> str:
     """Pretty-print an XML or JSON payload for display.
 
