@@ -632,8 +632,8 @@ wheels = [
 
 [[package]]
 name = "timdex-dataset-api"
-version = "5.0.0"
-source = { git = "https://github.com/MITLibraries/timdex-dataset-api?rev=USE-496-v5-data-source-refactor#8382797465e2daae2e8153f306e5892e40254fc2" }
+version = "5.1.0"
+source = { git = "https://github.com/MITLibraries/timdex-dataset-api#450af3c615389f1847883fa19879fa94a08c59af" }
 dependencies = [
     { name = "attrs" },
     { name = "boto3" },
@@ -664,7 +664,7 @@ dev = [
 requires-dist = [
     { name = "flask", specifier = ">=3.1.3" },
     { name = "flask-shell-ipython", specifier = ">=0.5.3" },
-    { name = "timdex-dataset-api", git = "https://github.com/MITLibraries/timdex-dataset-api?rev=USE-496-v5-data-source-refactor" },
+    { name = "timdex-dataset-api", git = "https://github.com/MITLibraries/timdex-dataset-api" },
 ]
 
 [package.metadata.requires-dev]

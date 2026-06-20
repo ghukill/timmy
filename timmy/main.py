@@ -224,7 +224,7 @@ def _fetch_record_version(
     return matches[0] if matches else None
 
 
-@main.get("/record/<timdex_record_id>")
+@main.get("/record/<timdex_record_id>/versions")
 def record_versions(timdex_record_id: str) -> str:
     """Overview of every version of a record across all runs.
 
@@ -257,13 +257,14 @@ def record_versions(timdex_record_id: str) -> str:
     )
 
 
-@main.get("/record/<timdex_record_id>/<run_id>/<int:run_record_offset>")
-def record(timdex_record_id: str, run_id: str, run_record_offset: int) -> str:
-    """Detail view for a single record version.
+def _render_record_detail(
+    timdex_record_id: str, run_id: str, run_record_offset: int
+) -> str:
+    """Fetch one record version (incl. payloads) and render the detail page.
 
-    Identified by the (timdex_record_id, run_id, run_record_offset) composite
-    key. Unlike the list view, this reads the actual payload columns
-    (source_record, transformed_record) via TDA's parquet-backed read path.
+    Shared by the current-record route and the verbose version route. Unlike the
+    list view, this reads the actual payload columns (source_record,
+    transformed_record) via TDA's parquet-backed read path.
     """
     rec = _fetch_record_version(timdex_record_id, run_id, run_record_offset)
     if rec is None:
@@ -278,6 +279,38 @@ def record(timdex_record_id: str, run_id: str, run_record_offset: int) -> str:
         source_pretty=prettify(rec.get("source_record"), source_format),
         transformed_pretty=prettify(rec.get("transformed_record"), "json"),
     )
+
+
+@main.get("/record/<timdex_record_id>")
+def record_current(timdex_record_id: str) -> str:
+    """Detail view for the current version of a record.
+
+    The friendly entry point: resolves the current (run_id, run_record_offset)
+    from metadata.current_records, then renders the same detail page as the
+    verbose version route.
+    """
+    conn = get_app_dataset().conn
+    with dataset_lock:
+        key = conn.execute(
+            "select run_id, run_record_offset from metadata.current_records "
+            "where timdex_record_id = ? limit 1",
+            [timdex_record_id],
+        ).fetchone()
+    if key is None:
+        abort(404, description="No current version found for that record id.")
+
+    run_id, run_record_offset = key
+    return _render_record_detail(timdex_record_id, run_id, run_record_offset)
+
+
+@main.get("/record/<timdex_record_id>/<run_id>/<int:run_record_offset>")
+def record(timdex_record_id: str, run_id: str, run_record_offset: int) -> str:
+    """Detail view for a specific record version (verbose composite-key form).
+
+    Identified by the (timdex_record_id, run_id, run_record_offset) composite
+    key, so any historical version is reachable -- not just the current one.
+    """
+    return _render_record_detail(timdex_record_id, run_id, run_record_offset)
 
 
 @main.get("/record/<timdex_record_id>/<run_id>/<int:run_record_offset>/payloads")

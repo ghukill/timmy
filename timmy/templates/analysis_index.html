@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Timmy &mdash; Analyses</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 2rem auto;
+        width: 90%;
+      }
+      a.back {
+        font-size: 0.85rem;
+      }
+      h1 {
+        font-size: 1.3rem;
+      }
+      table.list {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 0.85rem;
+        margin-top: 1rem;
+      }
+      table.list th,
+      table.list td {
+        text-align: left;
+        padding: 0.4rem 0.6rem;
+        border-bottom: 1px solid #eee;
+        vertical-align: top;
+      }
+      table.list th {
+        color: #444;
+        border-bottom: 1px solid #ccc;
+      }
+      table.list td {
+        font-family: ui-monospace, monospace;
+        word-break: break-word;
+      }
+      td.num {
+        text-align: right;
+      }
+      td .notes {
+        color: #888;
+        font-family: system-ui, sans-serif;
+        font-size: 0.75rem;
+        margin-top: 0.15rem;
+      }
+      button.danger {
+        color: #b00020;
+        border: 1px solid #e0b4bc;
+        background: #fff;
+        font-size: 0.75rem;
+        padding: 0.15rem 0.45rem;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      .empty {
+        color: #999;
+        font-style: italic;
+        margin-top: 1rem;
+      }
+    </style>
+  </head>
+  <body>
+    <p><a class="back" href="{{ url_for('main.records') }}">&larr; Back to records</a></p>
+    <h1>TIMDEX Metadata Analyses</h1>
+    <p>
+      Each analysis is a standalone DuckDB file flattening the transformed JSON
+      of a filtered corpus into queryable <code>(path, value)</code> rows.
+    </p>
+
+    {% if not analyses %}
+    <p class="empty">
+      No analyses yet. Filter some records, then &ldquo;Run TIMDEX Metadata
+      Analysis&rdquo; from the records page.
+    </p>
+    {% else %}
+    <table class="list">
+      <thead>
+        <tr>
+          <th>name</th>
+          <th>analysis</th>
+          <th>created (UTC)</th>
+          <th>filter</th>
+          <th class="num">docs</th>
+          <th class="num">eav rows</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in analyses %}
+        <tr>
+          <td>
+            <a href="{{ url_for('analysis.detail', analysis_id=a.analysis_id) }}">{{ a.name if a.name else "(unnamed)" }}</a>
+            {% if a.notes %}<div class="notes">{{ a.notes }}</div>{% endif %}
+          </td>
+          <td>{{ a.analysis_id }}</td>
+          <td>{{ a.created_at }}</td>
+          <td>{{ a.label }}</td>
+          <td class="num">{{ a.doc_count }}</td>
+          <td class="num">{{ a.eav_count }}</td>
+          <td>
+            <form
+              method="POST"
+              action="{{ url_for('analysis.delete', analysis_id=a.analysis_id) }}"
+              onsubmit="return confirm('Delete this analysis? This permanently removes its DuckDB file and cannot be undone.');"
+            >
+              <button type="submit" class="danger">delete</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </body>
+</html>

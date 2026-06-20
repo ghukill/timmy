@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-timdex-dataset-api = { git = "https://github.com/MITLibraries/timdex-dataset-api", rev = "USE-496-v5-data-source-refactor" }
+timdex-dataset-api = { git = "https://github.com/MITLibraries/timdex-dataset-api" }
 
 [dependency-groups]
 dev = [

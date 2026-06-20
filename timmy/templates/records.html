@@ -67,6 +67,13 @@
         min-height: 70px;
         font-size: 0.85rem;
       }
+      .analysis-bar {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+        margin-bottom: 1.5rem;
+      }
     </style>
   </head>
   <body>
@@ -112,6 +119,17 @@
         <button type="button" id="format">Format SQL</button>
       </div>
     </details>
+
+    <div class="analysis-bar">
+      <input type="text" id="analysis_name" placeholder="analysis name (optional)" />
+      <input type="text" id="analysis_notes" placeholder="notes (optional)" />
+      <button type="button" id="run-analysis">Run TIMDEX Metadata Analysis</button>
+      <a href="{{ url_for('analysis.index') }}">View past analyses</a>
+      <span class="warn"
+        >Flattens the transformed JSON of the current filter into a queryable
+        DuckDB analysis. Runs synchronously &mdash; may take a while.</span
+      >
+    </div>
 
     <table id="records" class="display" style="width: 100%">
       <thead>
@@ -173,14 +191,12 @@
           {
             data: "{{ col }}"
             {%- if col == "timdex_record_id" %},
-            // Link the id to the record detail page (key = id/run_id/offset).
+            // Link the id to the record's current detail page (/record/<id>).
             render: function (data, type, row) {
               if (type !== "display") return data;
               const href =
                 "{{ url_for('main.records') }}".replace(/records$/, "record/") +
-                encodeURIComponent(data) + "/" +
-                encodeURIComponent(row.run_id) + "/" +
-                encodeURIComponent(row.run_record_offset);
+                encodeURIComponent(data);
               const a = document.createElement("a");
               a.href = href;
               a.textContent = data;
@@ -200,6 +216,35 @@
         FILTER_IDS.forEach((id) => (document.getElementById(id).value = ""));
         whereEditor.setValue("");
         table.ajax.reload();
+      });
+
+      // Build an analysis from the CURRENT filter state. We POST the same
+      // inputs the table sends (typed filters, f_where, global search) so the
+      // analysis corpus matches exactly what's on screen, then let the browser
+      // navigate to the resulting /analysis/<id> page (POST-redirect-GET).
+      document.getElementById("run-analysis").addEventListener("click", () => {
+        const form = document.createElement("form");
+        form.method = "POST";
+        form.action = "{{ url_for('analysis.build') }}";
+
+        const add = (name, value) => {
+          const input = document.createElement("input");
+          input.type = "hidden";
+          input.name = name;
+          input.value = value;
+          form.appendChild(input);
+        };
+
+        FILTER_IDS.forEach((id) =>
+          add(id, document.getElementById(id).value.trim()),
+        );
+        add("f_where", whereEditor.getValue().trim());
+        add("search[value]", table.search());
+        add("name", document.getElementById("analysis_name").value.trim());
+        add("notes", document.getElementById("analysis_notes").value.trim());
+
+        document.body.appendChild(form);
+        form.submit();
       });
 
       // Pretty-print the raw SQL in place using sql-formatter.

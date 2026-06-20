@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Timmy &mdash; Values under {{ prefix }}</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.datatables.net/2.1.8/css/dataTables.dataTables.min.css"
+    />
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 2rem auto;
+        width: 90%;
+      }
+      a.back {
+        font-size: 0.85rem;
+      }
+      h1 {
+        font-size: 1.3rem;
+      }
+      h1 code {
+        font-size: 1.1rem;
+        background: #f3f3f3;
+        padding: 0.1rem 0.4rem;
+        border-radius: 4px;
+      }
+      p.lead {
+        font-size: 0.85rem;
+        color: #555;
+      }
+      table#values th,
+      table#values td {
+        font-family: ui-monospace, monospace;
+        font-size: 0.8rem;
+      }
+    </style>
+  </head>
+  <body>
+    <p>
+      <a class="back" href="{{ url_for('analysis.detail', analysis_id=analysis_id) }}">&larr; Back to analysis</a>
+      &nbsp;&middot;&nbsp;
+      <a class="back" href="{{ url_for('analysis.index') }}">All analyses</a>
+    </p>
+    <h1>Values under <code>{{ prefix or "(all paths)" }}</code></h1>
+    <p class="lead">
+      Distinct values for every path in scope. <code>documents</code> = records
+      with the value; <code>occurrences</code> = total times it appears;
+      <code>% of path</code> = the value's share of that path's values (low for
+      free text, high for controlled vocabulary). Click a value to see the
+      records that carry it.
+    </p>
+
+    <table id="values" class="display" style="width: 100%">
+      <thead>
+        <tr>
+          {% for col in columns %}
+          <th>{{ col }}</th>
+          {% endfor %}
+        </tr>
+      </thead>
+    </table>
+
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.datatables.net/2.1.8/js/dataTables.min.js"></script>
+    <script>
+      const PREFIX = {{ prefix | tojson }};
+      const RECORDS_DRILL =
+        "{{ url_for('analysis.value_records_page', analysis_id=analysis_id) }}";
+
+      function valueDrillHref(path, value) {
+        return (
+          RECORDS_DRILL +
+          "?path=" +
+          encodeURIComponent(path) +
+          "&value=" +
+          encodeURIComponent(value)
+        );
+      }
+
+      new DataTable("#values", {
+        serverSide: true,
+        processing: true,
+        ajax: {
+          url: "{{ url_for('analysis.values_data', analysis_id=analysis_id) }}",
+          data: function (d) {
+            d.prefix = PREFIX;
+          },
+        },
+        orderMulti: false,
+        order: [[2, "desc"]], // documents desc
+        pageLength: 25,
+        lengthMenu: [10, 25, 50, 100],
+        columns: [
+          { data: "path" },
+          {
+            data: "value",
+            // Click a value -> records carrying it (at this row's path).
+            render: function (data, type, row) {
+              if (type !== "display" || data === null) return data;
+              const a = document.createElement("a");
+              a.href = valueDrillHref(row.path, data);
+              a.textContent = data; // textContent escapes the value
+              return a.outerHTML;
+            },
+          },
+          { data: "documents" },
+          { data: "occurrences" },
+          {
+            data: "pct_of_path",
+            render: function (data, type) {
+              return type === "display" && data !== null ? data + "%" : data;
+            },
+          },
+        ],
+      });
+    </script>
+  </body>
+</html>

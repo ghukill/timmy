@@ -1,0 +1,515 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Timmy &mdash; Analysis {{ analysis_id }}</title>
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdn.datatables.net/2.1.8/css/dataTables.dataTables.min.css"
+    />
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 2rem auto;
+        width: 90%;
+      }
+      a.back {
+        font-size: 0.85rem;
+      }
+      h1 {
+        font-size: 1.3rem;
+        word-break: break-all;
+      }
+      p.subtitle {
+        margin-top: -0.5rem;
+        font-family: ui-monospace, monospace;
+        font-size: 0.8rem;
+        color: #999;
+      }
+      .inline-delete {
+        display: inline;
+      }
+      button.danger {
+        color: #b00020;
+        border: 1px solid #e0b4bc;
+        background: #fff;
+        font-size: 0.8rem;
+        padding: 0.2rem 0.5rem;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      .edit-form label {
+        display: block;
+        font-size: 0.85rem;
+        color: #444;
+        margin-bottom: 0.5rem;
+      }
+      .edit-form input,
+      .edit-form textarea {
+        display: block;
+        width: 100%;
+        max-width: 640px;
+        margin-top: 0.2rem;
+        padding: 0.35rem 0.5rem;
+        font-family: inherit;
+        font-size: 0.85rem;
+      }
+      section {
+        margin-top: 2rem;
+      }
+      section h2 {
+        font-size: 1.05rem;
+        border-bottom: 1px solid #ddd;
+        padding-bottom: 0.25rem;
+      }
+      table.meta {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 0.85rem;
+      }
+      table.meta th,
+      table.meta td {
+        text-align: left;
+        padding: 0.3rem 0.6rem;
+        border-bottom: 1px solid #eee;
+        vertical-align: top;
+      }
+      table.meta th {
+        width: 180px;
+        font-family: ui-monospace, monospace;
+        color: #444;
+        white-space: nowrap;
+      }
+      table.meta td {
+        font-family: ui-monospace, monospace;
+        word-break: break-all;
+      }
+      .examples {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        margin: 0.75rem 0;
+      }
+      .examples button {
+        font-size: 0.75rem;
+        padding: 0.25rem 0.5rem;
+        cursor: pointer;
+      }
+      .CodeMirror {
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        height: auto;
+        min-height: 220px;
+        font-size: 0.85rem;
+        /* Drag the bottom-right corner to resize the editor taller/shorter. */
+        resize: vertical;
+        overflow: auto;
+      }
+      .console-actions {
+        margin-top: 0.5rem;
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+      }
+      #status {
+        font-size: 0.8rem;
+        color: #555;
+      }
+      #status.error {
+        color: #b00020;
+        font-family: ui-monospace, monospace;
+      }
+      /* SQL console results render as a client-side DataTable. */
+      #results-wrap {
+        margin-top: 1rem;
+      }
+      table#results th,
+      table#results td {
+        font-family: ui-monospace, monospace;
+        font-size: 0.8rem;
+        white-space: nowrap;
+      }
+      .empty {
+        color: #999;
+        font-style: italic;
+      }
+      .report-wrap {
+        max-height: 520px;
+        overflow: auto;
+        border: 1px solid #eee;
+        border-radius: 4px;
+        margin-top: 0.75rem;
+      }
+      table.report {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 0.8rem;
+      }
+      table.report th,
+      table.report td {
+        text-align: left;
+        padding: 0.3rem 0.55rem;
+        border-bottom: 1px solid #eee;
+        font-family: ui-monospace, monospace;
+        vertical-align: middle;
+      }
+      table.report th {
+        border-bottom: 1px solid #ccc;
+        color: #444;
+        position: sticky;
+        top: 0;
+        background: #fff;
+      }
+      table.report th.num,
+      table.report td.num {
+        text-align: right;
+      }
+      /* Every doc in the corpus populates this field. */
+      table.report tr.full td {
+        background: #eafaef;
+      }
+      .cov {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+      .cov-bar {
+        width: 90px;
+        height: 8px;
+        background: #eee;
+        border-radius: 4px;
+        overflow: hidden;
+        flex: none;
+      }
+      .cov-fill {
+        height: 100%;
+        background: #7aa7d8;
+      }
+      tr.full .cov-fill {
+        background: #4caf78;
+      }
+      .cov-pct {
+        width: 3.2rem;
+      }
+      .cov-count {
+        color: #999;
+        font-size: 0.7rem;
+      }
+      .pct-unique {
+        color: #999;
+        font-size: 0.7rem;
+        white-space: nowrap;
+      }
+      td.sample {
+        max-width: 280px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #555;
+      }
+    </style>
+  </head>
+  <body>
+    <p>
+      <a class="back" href="{{ url_for('main.records') }}">&larr; Back to records</a>
+      &nbsp;&middot;&nbsp;
+      <a class="back" href="{{ url_for('analysis.index') }}">All analyses</a>
+      &nbsp;&middot;&nbsp;
+      <form
+        class="inline-delete"
+        method="POST"
+        action="{{ url_for('analysis.delete', analysis_id=analysis_id) }}"
+        onsubmit="return confirm('Delete this analysis? This permanently removes its DuckDB file and cannot be undone.');"
+      >
+        <button type="submit" class="danger">Delete analysis</button>
+      </form>
+    </p>
+    <h1>{{ manifest.name if manifest.name else analysis_id }}</h1>
+    {% if manifest.name %}<p class="subtitle">{{ analysis_id }}</p>{% endif %}
+
+    <section>
+      <h2>Name &amp; notes</h2>
+      <form method="POST" action="{{ url_for('analysis.update', analysis_id=analysis_id) }}" class="edit-form">
+        <label>
+          name
+          <input type="text" name="name" value="{{ manifest.name if manifest.name else '' }}" placeholder="a memorable name" />
+        </label>
+        <label>
+          notes
+          <textarea name="notes" rows="3" placeholder="why this analysis exists, what to look at, caveats…">{{ manifest.notes if manifest.notes else '' }}</textarea>
+        </label>
+        <button type="submit">Save</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Manifest</h2>
+      <table class="meta">
+        <tbody>
+          {% for key in ["label", "created_at", "dataset_location", "table_name",
+                         "filters_json", "where_predicate", "doc_count",
+                         "eav_count", "skipped_count"] %}
+          <tr>
+            <th>{{ key }}</th>
+            <td>{{ manifest[key] if manifest[key] is not none else "" }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Field-usage report</h2>
+      <p style="font-size: 0.85rem; color: #555">
+        Coverage of each flattened path across the
+        {{ "{:,}".format(manifest.doc_count) }} docs in this corpus &mdash; the
+        share of docs that populate the field. Rows where
+        <strong>every</strong> doc has a value are tinted green. Per-field value
+        drill-down is the next layer; for value-level questions use the SQL
+        console below.
+      </p>
+      {% if not report %}
+      <p class="empty">No fields &mdash; this corpus produced no flattened rows.</p>
+      {% else %}
+      <div class="report-wrap">
+        <table class="report">
+          <thead>
+            <tr>
+              <th>path</th>
+              <th>type</th>
+              <th>coverage</th>
+              <th class="num">distinct values</th>
+              <th>sample</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for f in report %}
+            <tr class="{{ 'full' if f.coverage_pct == 100 else '' }}">
+              <td>
+                <a href="{{ url_for('analysis.values', analysis_id=analysis_id, prefix=f.path) }}">{{ f.path }}</a>
+              </td>
+              <td>{{ f.value_type }}</td>
+              <td>
+                <div class="cov">
+                  <div class="cov-bar">
+                    <div class="cov-fill" style="width: {{ f.coverage_pct }}%"></div>
+                  </div>
+                  <span class="cov-pct">{{ f.coverage_pct }}%</span>
+                  <span class="cov-count">{{ f.doc_count }}/{{ manifest.doc_count }}</span>
+                </div>
+              </td>
+              <td class="num">
+                {{ "{:,}".format(f.distinct_values) }}
+                {% if f.pct_unique is not none %}<span class="pct-unique">· {{ f.pct_unique }}% uniq</span>{% endif %}
+              </td>
+              <td class="sample" title="{{ f.sample_value if f.sample_value is not none else '' }}">
+                {{ f.sample_value if f.sample_value is not none else "" }}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+    </section>
+
+    <section>
+      <h2>SQL console</h2>
+      <p style="font-size: 0.85rem; color: #555">
+        Read-only SQL over <code>eav</code>, <code>docs</code>, and
+        <code>manifest</code>. Select <code>timdex_record_id</code> to get
+        clickable links to each record (its current form); add
+        <code>run_id</code> and <code>run_record_offset</code> to link a
+        specific version instead. Results capped at
+        {{ "{:,}".format(max_rows) }} rows.
+      </p>
+      <div class="examples" id="examples"></div>
+      <textarea id="sql"></textarea>
+      <div class="console-actions">
+        <button type="button" id="run">Run</button>
+        <span id="status"></span>
+      </div>
+      <div id="results-wrap" style="display: none">
+        <table id="results" class="display" style="width: 100%"></table>
+      </div>
+    </section>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/sql/sql.min.js"></script>
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.datatables.net/2.1.8/js/dataTables.min.js"></script>
+    <script>
+      const QUERY_URL = "{{ url_for('analysis.query', analysis_id=analysis_id) }}";
+      // Base for record drill-through links: /record/<id>/<run_id>/<offset>.
+      const RECORD_BASE =
+        "{{ url_for('main.records') }}".replace(/records$/, "record/");
+      // Built over current_records, so a bare timdex_record_id is enough to
+      // link to a record's current form (no run_id/offset needed).
+      const CURRENT_RECORDS_ANALYSIS =
+        {{ 'true' if manifest.table_name == 'current_records' else 'false' }};
+
+      // Canned starting points; the first is the default editor content.
+      const EXAMPLES = {
+        "Field usage ranking":
+          "select path,\n" +
+          "       count(*) as occurrences,\n" +
+          "       count(distinct timdex_composite_id) as docs\n" +
+          "from eav\n" +
+          "group by path\n" +
+          "order by docs desc\n" +
+          "limit 50;",
+        "Coverage of a field":
+          "select count(distinct timdex_composite_id) as uses,\n" +
+          "       (select count(*) from docs) as total_docs\n" +
+          "from eav\n" +
+          "where path = 'contributors[].value';",
+        "Value distribution":
+          "select value, count(distinct timdex_composite_id) as docs\n" +
+          "from eav\n" +
+          "where path = 'contributors[].kind'\n" +
+          "group by value\n" +
+          "order by docs desc\n" +
+          "limit 50;",
+        "Value length stats":
+          "select min(length(value)) as min_len,\n" +
+          "       max(length(value)) as max_len,\n" +
+          "       round(avg(length(value)), 1) as avg_len\n" +
+          "from eav\n" +
+          "where path = 'title' and value_type = 'string';",
+        "Records using a field":
+          "select d.timdex_record_id, d.run_id, d.run_record_offset,\n" +
+          "       d.source, e.value\n" +
+          "from eav e join docs d using (timdex_composite_id)\n" +
+          "where e.path = 'contributors[].value'\n" +
+          "limit 100;",
+      };
+
+      const editor = CodeMirror.fromTextArea(document.getElementById("sql"), {
+        mode: "text/x-sql",
+        lineNumbers: true,
+        lineWrapping: true,
+      });
+
+      const exampleBar = document.getElementById("examples");
+      Object.keys(EXAMPLES).forEach((name, i) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.textContent = name;
+        b.addEventListener("click", () => editor.setValue(EXAMPLES[name]));
+        exampleBar.appendChild(b);
+        if (i === 0) editor.setValue(EXAMPLES[name]);
+      });
+
+      const statusEl = document.getElementById("status");
+      const wrap = document.getElementById("results-wrap");
+      const resultsTable = document.getElementById("results");
+      let dt = null;
+
+      function recordHref(id, runId, offset) {
+        return (
+          RECORD_BASE +
+          encodeURIComponent(id) +
+          "/" +
+          encodeURIComponent(runId) +
+          "/" +
+          encodeURIComponent(offset)
+        );
+      }
+
+      function currentRecordHref(id) {
+        return RECORD_BASE + encodeURIComponent(id);
+      }
+
+      function render(payload) {
+        const { columns, rows, truncated, row_count } = payload;
+
+        // Columns are dynamic per query, so tear down and rebuild each run.
+        if (dt) {
+          dt.destroy();
+          dt = null;
+        }
+        resultsTable.innerHTML = "";
+
+        // If the key columns are present, link timdex_record_id to its version.
+        const idIdx = columns.indexOf("timdex_record_id");
+        const runIdx = columns.indexOf("run_id");
+        const offIdx = columns.indexOf("run_record_offset");
+        const hasFullKey = idIdx !== -1 && runIdx !== -1 && offIdx !== -1;
+        // Link the id when we have the full version key (exact version), or when
+        // the analysis is over current_records (id alone -> current form).
+        const linkId = idIdx !== -1 && (hasFullKey || CURRENT_RECORDS_ANALYSIS);
+
+        const cols = columns.map((name, i) => {
+          if (linkId && i === idIdx) {
+            return {
+              title: name,
+              render: function (data, type, row) {
+                if (type !== "display" || data === null) return data;
+                const a = document.createElement("a");
+                a.href = hasFullKey
+                  ? recordHref(data, row[runIdx], row[offIdx])
+                  : currentRecordHref(data);
+                a.textContent = data; // textContent escapes the value
+                return a.outerHTML;
+              },
+            };
+          }
+          // render.text() HTML-escapes cell values (data is trusted-source but
+          // arbitrary, so never inject it as raw HTML).
+          return { title: name, render: DataTable.render.text() };
+        });
+
+        wrap.style.display = "";
+        dt = new DataTable(resultsTable, {
+          data: rows,
+          columns: cols,
+          deferRender: true,
+          order: [],
+          scrollX: true,
+          pageLength: 25,
+          lengthMenu: [10, 25, 50, 100],
+        });
+
+        statusEl.classList.remove("error");
+        statusEl.textContent =
+          `${row_count} row(s)` + (truncated ? ` (capped at {{ max_rows }})` : "");
+      }
+
+      async function run() {
+        const sql = editor.getValue().trim();
+        if (!sql) return;
+        statusEl.classList.remove("error");
+        statusEl.textContent = "Running…";
+        try {
+          const resp = await fetch(QUERY_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sql }),
+          });
+          const payload = await resp.json();
+          if (!resp.ok) {
+            statusEl.classList.add("error");
+            statusEl.textContent = payload.error || "Query failed.";
+            return;
+          }
+          render(payload);
+        } catch (err) {
+          statusEl.classList.add("error");
+          statusEl.textContent = String(err);
+        }
+      }
+
+      document.getElementById("run").addEventListener("click", run);
+      // Ctrl/Cmd-Enter to run from inside the editor.
+      editor.setOption("extraKeys", {
+        "Ctrl-Enter": run,
+        "Cmd-Enter": run,
+      });
+    </script>
+  </body>
+</html>
