@@ -6,17 +6,17 @@ from typing import Any
 from flask import Flask
 
 from timmy.analysis_views import analysis_bp
+from timmy.config import default_flask_config, load_config, to_flask_config
 from timmy.dataset import load_dataset
 from timmy.main import main
 from timmy.runs_views import runs_bp
 
 
+# Base layer applied before either resolved config or test_config, so the app
+# always has these keys present (the resolver/test_config then override).
 DEFAULT_CONFIG: dict[str, Any] = {
     "SECRET_KEY": "dev",
-    "LOG_LEVEL": "INFO",
-    "TIMDEX_DATASET_LOCATION": None,
-    # Directory where materialized analysis DuckDB files are written/read.
-    "TIMDEX_ANALYSIS_DIR": "analyses",
+    **default_flask_config(),
 }
 
 
@@ -47,13 +47,23 @@ def configure_logging(app: Flask) -> None:
     )
 
 
-def create_app(test_config: dict[str, Any] | None = None) -> Flask:
-    """Application factory for the Flask app."""
+def create_app(
+    test_config: dict[str, Any] | None = None,
+    *,
+    config_overrides: dict[str, Any] | None = None,
+) -> Flask:
+    """Application factory for the Flask app.
+
+    Config resolution lives in :mod:`timmy.config` so the web app and CLI agree
+    on where values come from. ``config_overrides`` carries CLI flag values (e.g.
+    ``timmy --dataset-location ... webapp run``); ``test_config`` bypasses the
+    resolver entirely for tests.
+    """
     app = Flask(__name__)
     app.config.from_mapping(DEFAULT_CONFIG)
 
     if test_config is None:
-        app.config.from_prefixed_env(prefix="TIMMY")
+        app.config.update(to_flask_config(load_config(config_overrides)))
     else:
         app.config.update(test_config)
 
@@ -64,8 +74,8 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
     dataset_location = app.config["TIMDEX_DATASET_LOCATION"]
     if not dataset_location:
         raise RuntimeError(
-            "TIMDEX_DATASET_LOCATION is not configured. "
-            "Set it in Flask config or via TIMMY_TIMDEX_DATASET_LOCATION."
+            "dataset_location is not configured. Run `timmy init`, set it in "
+            "~/.timmy/config.toml, or export TIMMY_TIMDEX_DATASET_LOCATION."
         )
 
     # load TIMDEXDataset once when the app boots
