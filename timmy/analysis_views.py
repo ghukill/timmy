@@ -31,13 +31,13 @@ from flask import (
 
 from timmy import analysis
 from timmy.dataset import dataset_lock, get_app_dataset
-from timmy.main import (
+from timmy.filters import (
     IN_FILTER_COLUMNS,
-    SEARCHABLE_COLUMNS,
-    _all_versions,
-    _record_limit,
-    _split_csv,
+    build_tda_filter,
+    filter_label,
+    split_csv,
 )
+from timmy.main import _all_versions, _record_limit
 
 analysis_bp = Blueprint("analysis", __name__, url_prefix="/analysis")
 
@@ -74,57 +74,25 @@ def _dt_params(args, columns: list[str]) -> tuple[int, int, int, str, str, str]:
     return draw, start, length, search, order_col, order_dir
 
 
-def _sql_literal(value: str) -> str:
-    """Quote a string as a SQL literal (single quotes doubled)."""
-    return "'" + value.replace("'", "''") + "'"
-
-
 def _tda_filter_from_request(values) -> tuple[str | None, dict[str, Any]]:
-    """Translate the /records filter inputs into TDA's (where, **filters) model.
-
-    The typed comma-separated filters map onto TDA's typed ``**filters`` (which
-    TDA binds safely); the global search box and the freeform ``f_where`` become
-    a raw ``where`` string -- the same trusted power-tool semantics as the
-    browse view, and harmless here because the analysis read is the user's own.
+    """Extract the /records filter inputs from a request, then defer to the
+    Flask-free :func:`timmy.filters.build_tda_filter` so the web build and the
+    CLI build (``timmy analysis build``) produce identical filters.
     """
     filters: dict[str, Any] = {}
     for column in IN_FILTER_COLUMNS:
-        items = _split_csv(values.get(f"f_{column}", "") or "")
+        items = split_csv(values.get(f"f_{column}", "") or "")
         if items:
             filters[column] = items
     run_date = (values.get("f_run_date", "") or "").strip()
     if run_date:
         filters["run_date"] = run_date
 
-    where_parts: list[str] = []
-    search_value = (values.get("search[value]", "") or "").strip()
-    if search_value:
-        term = _sql_literal(f"%{search_value}%")
-        ors = " or ".join(
-            f"cast({col} as varchar) ilike {term}" for col in SEARCHABLE_COLUMNS
-        )
-        where_parts.append(f"({ors})")
-    where_raw = (values.get("f_where", "") or "").strip()
-    if where_raw:
-        where_parts.append(f"({where_raw})")
-
-    where = " and ".join(where_parts) if where_parts else None
-    return where, filters
-
-
-def _label_from(
-    where: str | None, filters: dict[str, Any], limit: int | None = None
-) -> str:
-    """A short human label for the analysis, derived from its filter."""
-    parts = [
-        f"{key}={','.join(val) if isinstance(val, list) else val}"
-        for key, val in filters.items()
-    ]
-    if where:
-        parts.append("custom where")
-    if limit is not None:
-        parts.append(f"limit={limit}")
-    return "; ".join(parts) if parts else "all current records"
+    return build_tda_filter(
+        filters,
+        search=values.get("search[value]", "") or "",
+        where=values.get("f_where", "") or "",
+    )
 
 
 def _jsonable(value: Any) -> Any:
@@ -156,7 +124,7 @@ def build():
     # Match the browse: an analysis built from an all-versions browse reads every
     # version (metadata.records), not just current ones.
     table = "records" if _all_versions(request.values) else "current_records"
-    label = _label_from(where, filters, limit)
+    label = filter_label(where, filters, limit)
     name = request.values.get("name", default="", type=str).strip() or None
     notes = request.values.get("notes", default="", type=str).strip() or None
     try:

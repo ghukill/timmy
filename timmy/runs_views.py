@@ -23,7 +23,7 @@ from __future__ import annotations
 from flask import Blueprint, jsonify, render_template, request
 
 from timmy.dataset import dataset_lock, get_app_dataset
-from timmy.main import _split_csv
+from timmy.filters import split_csv
 
 runs_bp = Blueprint("runs", __name__, url_prefix="/runs")
 
@@ -98,7 +98,7 @@ def _build_where(args) -> tuple[str, list]:
         params.extend([f"%{search_value}%"] * len(SEARCHABLE_COLUMNS))
 
     for column in ("source", "run_type"):
-        values = _split_csv(args.get(f"f_{column}", default="", type=str))
+        values = split_csv(args.get(f"f_{column}", default="", type=str))
         if values:
             placeholders = ", ".join(["?"] * len(values))
             clauses.append(f"{column} in ({placeholders})")

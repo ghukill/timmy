@@ -12,6 +12,10 @@ read commands offer ``--json`` with stable shapes for agents.
 from __future__ import annotations
 
 import json
+import logging
+import re
+import sys
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import click
@@ -22,6 +26,7 @@ from timmy.config import (
     load_config,
     resolve_config,
 )
+from timmy.filters import build_tda_filter, filter_label, split_csv
 from timmy.output import emit_csv, emit_json, emit_record, emit_rows
 
 # Cap rows pulled by `analysis query`; one extra is fetched to detect overflow.
@@ -396,6 +401,243 @@ def analysis_query(
         emit_json(dict_rows)
         return
     emit_rows(dict_rows, as_json=False, columns=columns)
+
+
+# --------------------------------------------------------------------------- #
+# analysis build / delete / prune (write & manage surface)
+# --------------------------------------------------------------------------- #
+def _load_dataset(ctx: click.Context):
+    """Load the TIMDEXDataset from resolved config (the expensive, once-per-run cost).
+
+    No ``dataset_lock``: a one-shot CLI process owns its own DuckDB connection,
+    unlike the web app's shared, threaded one.
+    """
+    from timmy.dataset import load_dataset
+
+    location = load_config(ctx.obj["overrides"]).get("dataset_location")
+    if not location:
+        raise click.ClickException(
+            "dataset_location is not configured. Run `timmy init` or pass "
+            "--dataset-location."
+        )
+    return load_dataset(location)
+
+
+def _flatten_csv(values: tuple[str, ...]) -> list[str]:
+    """Flatten repeatable flags, each of which may also be comma-separated."""
+    out: list[str] = []
+    for value in values:
+        out.extend(split_csv(value))
+    return out
+
+
+@analysis.command("build")
+@click.option("--source", "sources", multiple=True, help="Filter by source (repeatable/CSV).")
+@click.option("--run-type", "run_types", multiple=True, help="Filter by run_type.")
+@click.option("--action", "actions", multiple=True, help="Filter by action.")
+@click.option("--run-id", "run_ids", multiple=True, help="Filter by run_id.")
+@click.option("--run-date", default=None, help="Exact run date (YYYY-MM-DD).")
+@click.option("--where", default=None, help="Raw SQL predicate (trusted power tool).")
+@click.option("--limit", default=None, type=int, help="Cap how many records are read.")
+@click.option(
+    "--all-versions",
+    is_flag=True,
+    help="Read every record version (metadata.records), not just current ones.",
+)
+@click.option("--name", default=None, help="Human name for the analysis.")
+@click.option("--notes", default=None, help="Free-text notes stored in the manifest.")
+@json_option
+@click.pass_context
+def analysis_build(
+    ctx: click.Context,
+    sources: tuple[str, ...],
+    run_types: tuple[str, ...],
+    actions: tuple[str, ...],
+    run_ids: tuple[str, ...],
+    run_date: str | None,
+    where: str | None,
+    limit: int | None,
+    all_versions: bool,
+    name: str | None,
+    notes: str | None,
+    as_json: bool,
+) -> None:
+    """Build one analysis DB from records matching a filter (foreground).
+
+    Progress and the build summary go to stderr; the manifest is the data, on
+    stdout. Filter semantics match the web build exactly (shared timmy.filters).
+    """
+    from timmy.analysis import build_analysis
+
+    filters: dict[str, Any] = {}
+    for column, values in (
+        ("source", sources),
+        ("run_type", run_types),
+        ("action", actions),
+        ("run_id", run_ids),
+    ):
+        collected = _flatten_csv(values)
+        if collected:
+            filters[column] = collected
+    if run_date:
+        filters["run_date"] = run_date.strip()
+
+    where_combined, filters = build_tda_filter(filters, where=where)
+    label = filter_label(where_combined, filters, limit)
+    table = "records" if all_versions else "current_records"
+
+    _configure_cli_logging()
+    click.echo(f"Building analysis ({label})…", err=True)
+    td = _load_dataset(ctx)
+    try:
+        manifest = build_analysis(
+            td,
+            _analyses_dir(ctx),
+            where=where_combined,
+            table=table,
+            limit=limit,
+            label=label,
+            name=name,
+            notes=notes,
+            **filters,
+        )
+    except Exception as exc:  # noqa: BLE001 -- surface build failures as a clean exit
+        raise click.ClickException(f"Analysis build failed: {exc}") from exc
+
+    click.echo(
+        f"Built {manifest['analysis_id']}: {manifest['doc_count']} docs, "
+        f"{manifest['eav_count']} eav rows, {manifest['skipped_count']} skipped",
+        err=True,
+    )
+    if as_json:
+        emit_json(manifest)
+    else:
+        emit_record(manifest, as_json=False)
+
+
+def _configure_cli_logging() -> None:
+    """Send INFO logs (e.g. build_analysis's summary) to stderr for a CLI run."""
+    logging.basicConfig(
+        stream=sys.stderr,
+        level=logging.INFO,
+        format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
+    )
+
+
+@analysis.command("delete")
+@click.argument("analysis_id")
+@click.option("--yes", is_flag=True, help="Delete without confirming.")
+@click.pass_context
+def analysis_delete(ctx: click.Context, analysis_id: str, yes: bool) -> None:
+    """Delete one analysis DB file."""
+    from timmy.analysis import delete_analysis, is_valid_analysis_id
+
+    if not is_valid_analysis_id(analysis_id):
+        raise click.ClickException(f"Not a valid analysis id: {analysis_id!r}")
+    if not yes and not click.confirm(f"Delete analysis {analysis_id}?", default=False):
+        click.echo("Aborted.", err=True)
+        raise SystemExit(1)
+    if not delete_analysis(_analyses_dir(ctx), analysis_id):
+        raise click.ClickException(f"No analysis {analysis_id} to delete.")
+    click.echo(f"Deleted {analysis_id}", err=True)
+
+
+_DURATION_RE = re.compile(r"^\s*(\d+)\s*([wdhms])\s*$")
+_DURATION_UNITS = {
+    "w": "weeks",
+    "d": "days",
+    "h": "hours",
+    "m": "minutes",
+    "s": "seconds",
+}
+
+
+def _parse_duration(text: str) -> timedelta:
+    """Parse a duration like ``30d``, ``2w``, ``12h`` into a timedelta."""
+    match = _DURATION_RE.match(text)
+    if not match:
+        raise click.ClickException(
+            f"Bad --older-than {text!r}; use e.g. 30d, 2w, 12h, 45m."
+        )
+    amount, unit = int(match.group(1)), match.group(2)
+    return timedelta(**{_DURATION_UNITS[unit]: amount})
+
+
+def _created_at_naive(manifest: dict[str, Any]) -> datetime | None:
+    """Manifest created_at as a naive (UTC) datetime, for cutoff comparison."""
+    created = manifest.get("created_at")
+    if not isinstance(created, datetime):
+        return None
+    return created.replace(tzinfo=None) if created.tzinfo else created
+
+
+@analysis.command("prune")
+@click.option("--older-than", default=None, help="Prune analyses older than e.g. 30d, 2w, 12h.")
+@click.option("--keep", default=None, type=int, help="Always keep the N newest in scope.")
+@click.option("--source", default=None, help="Limit pruning to analyses built for this source.")
+@click.option("--dry-run", is_flag=True, help="Show what would be pruned; delete nothing.")
+@click.option("--yes", is_flag=True, help="Prune without confirming.")
+@json_option
+@click.pass_context
+def analysis_prune(
+    ctx: click.Context,
+    older_than: str | None,
+    keep: int | None,
+    source: str | None,
+    dry_run: bool,
+    yes: bool,
+    as_json: bool,
+) -> None:
+    """Bulk-delete old analyses, selected by age / count / source.
+
+    ``--source`` scopes the candidate set; ``--older-than`` and ``--keep`` then
+    select within it (``--keep`` always protects the N newest). At least one of
+    the three is required -- prune never targets everything by default.
+    """
+    from timmy.analysis import delete_analysis, list_analyses
+
+    if older_than is None and keep is None and source is None:
+        raise click.ClickException(
+            "Refusing to prune everything; pass --older-than, --keep, or --source."
+        )
+
+    analyses_dir = _analyses_dir(ctx)
+    scope = list_analyses(analyses_dir)  # newest first
+    if source:
+        scope = [m for m in scope if _manifest_matches_source(m, source)]
+
+    protected = {m["analysis_id"] for m in scope[:keep]} if keep is not None else set()
+    if older_than:
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - _parse_duration(older_than)
+        aged = [m for m in scope if (c := _created_at_naive(m)) and c < cutoff]
+    else:
+        # --keep or --source alone: every in-scope analysis is a candidate, and
+        # the newest `keep` are protected below.
+        aged = scope
+    to_prune = [m for m in aged if m["analysis_id"] not in protected]
+
+    columns = ["analysis_id", "created_at", "label", "doc_count"]
+    if not to_prune:
+        click.echo("Nothing to prune.", err=True)
+        if as_json:
+            emit_json([])
+        return
+
+    if dry_run:
+        click.echo(f"Would prune {len(to_prune)} analysis file(s) (dry run):", err=True)
+        emit_rows(to_prune, as_json=as_json, columns=columns)
+        return
+
+    if not yes and not click.confirm(
+        f"Delete {len(to_prune)} analysis file(s)?", default=False
+    ):
+        click.echo("Aborted.", err=True)
+        raise SystemExit(1)
+
+    for manifest in to_prune:
+        delete_analysis(analyses_dir, manifest["analysis_id"])
+    click.echo(f"Pruned {len(to_prune)} analysis file(s).", err=True)
+    emit_rows(to_prune, as_json=as_json, columns=columns)
 
 
 if __name__ == "__main__":

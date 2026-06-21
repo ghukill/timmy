@@ -1,18 +1,13 @@
 from flask import Blueprint, abort, jsonify, render_template, request
 
 from timmy.dataset import dataset_lock, get_app_dataset
+from timmy.filters import IN_FILTER_COLUMNS, SEARCHABLE_COLUMNS, split_csv
 from timmy.sources import extract_timdex_fields, get_source_record_format, prettify
 
 main = Blueprint("main", __name__)
 
-# Metadata columns that accept a comma-separated list of values, applied as an
-# `IN (...)` predicate. All are parameterized, so the values are safe.
-IN_FILTER_COLUMNS = [
-    "source",
-    "run_type",
-    "action",
-    "run_id",
-]
+# Filter columns and the free-text search set are shared, Flask-free, with the
+# analysis build (see timmy.filters): IN_FILTER_COLUMNS, SEARCHABLE_COLUMNS.
 
 # Full set of metadata fields shown at the top of the record detail page, in
 # display order. These are TDA's TIMDEXRecords.METADATA_COLUMNS.
@@ -39,16 +34,6 @@ RECORD_COLUMNS = [
     "action",
     "run_id",
     "run_record_offset",
-]
-
-# Columns the DataTables global search box applies to. We cast to varchar so the
-# ILIKE works regardless of the underlying column type (dates, uuids, etc.).
-SEARCHABLE_COLUMNS = [
-    "timdex_record_id",
-    "source",
-    "run_type",
-    "action",
-    "run_id",
 ]
 
 # SQL select expressions for columns that need shaping for display. Columns not
@@ -103,11 +88,6 @@ def records() -> str:
     return render_template("records.html", columns=RECORD_COLUMNS)
 
 
-def _split_csv(value: str) -> list[str]:
-    """Split a comma-separated filter value into a clean list of terms."""
-    return [item.strip() for item in value.split(",") if item.strip()]
-
-
 def _all_versions(args) -> bool:
     """Whether to browse every version (metadata.records) vs. current only.
 
@@ -152,7 +132,7 @@ def _build_where(args) -> tuple[str, list]:
 
     # Comma-separated IN-list filters.
     for column in IN_FILTER_COLUMNS:
-        values = _split_csv(args.get(f"f_{column}", default="", type=str))
+        values = split_csv(args.get(f"f_{column}", default="", type=str))
         if values:
             placeholders = ", ".join(["?"] * len(values))
             clauses.append(f"{column} in ({placeholders})")
