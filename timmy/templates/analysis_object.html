@@ -36,6 +36,42 @@
         font-family: ui-monospace, monospace;
         font-size: 0.8rem;
       }
+      h2.sub {
+        font-size: 1.05rem;
+        border-bottom: 1px solid #ddd;
+        padding-bottom: 0.25rem;
+        margin-top: 2rem;
+      }
+      table.schema {
+        border-collapse: collapse;
+        font-size: 0.8rem;
+        margin: 0.5rem 0 1.5rem;
+        min-width: 60%;
+      }
+      table.schema th,
+      table.schema td {
+        text-align: left;
+        padding: 0.3rem 0.7rem;
+        border-bottom: 1px solid #eee;
+        font-family: ui-monospace, monospace;
+      }
+      table.schema th.num,
+      table.schema td.num {
+        text-align: right;
+      }
+      table.schema th {
+        color: #444;
+      }
+      span.ftype {
+        color: #777;
+      }
+      span.ftype.complex {
+        color: #6b3fb3;
+        font-weight: 600;
+      }
+      td.muted {
+        color: #999;
+      }
     </style>
   </head>
   <body>
@@ -55,9 +91,47 @@
     </h1>
     <p class="lead">
       One row per object instance{% if value is not none %} that carries the
-      matched value{% endif %}, with its member fields as columns. Multi-valued
-      fields are joined with <code>&nbsp;|&nbsp;</code>.
+      matched value{% endif %}, with its member fields as columns. Array members
+      render as a list, e.g. <code>[a, b, c]</code>.
     </p>
+
+    {% if member_stats %}
+    <h2 class="sub">Structure</h2>
+    <p class="lead">
+      The member fields of these objects and their shape <em>within a single
+      object</em> &mdash; type, what share of objects carry the member, and the
+      per-object count (min&nbsp;/&nbsp;avg&nbsp;/&nbsp;max). A scalar member reads
+      1&nbsp;/&nbsp;1&nbsp;/&nbsp;1; an array member shows its real spread.
+    </p>
+    <table class="schema">
+      <thead>
+        <tr>
+          <th>member</th>
+          <th>type</th>
+          <th class="num">present</th>
+          <th class="num">per object (min / avg / max)</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for m in member_stats %}
+        <tr>
+          <td>{{ m.label }}</td>
+          <td><span class="ftype {{ 'complex' if m.type == 'object' or m.type.startswith('array[object') else '' }}">{{ m.type }}</span></td>
+          <td class="num">{{ m.presence_pct }}%</td>
+          <td class="num">{{ m.count_min }} / {{ m.count_avg }} / {{ m.count_max }}</td>
+          <td>
+            <a href="{{ url_for('analysis.values', analysis_id=analysis_id, prefix=m.path) }}"
+              >view values &rarr;</a
+            >
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <h2 class="sub">Objects</h2>
+    {% endif %}
 
     <table id="object" class="display" style="width: 100%">
       <thead>

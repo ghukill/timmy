@@ -200,7 +200,7 @@ def delete(analysis_id: str):
 
 @analysis_bp.get("/<analysis_id>")
 def detail(analysis_id: str) -> str:
-    """Analysis home: manifest, SQL console, and the (stubbed) field report."""
+    """Analysis home: manifest, SQL console, and the schema-overview report."""
     _check_analysis_id(analysis_id)
     try:
         manifest = analysis.read_manifest(_analyses_dir(), analysis_id)
@@ -208,33 +208,12 @@ def detail(analysis_id: str) -> str:
     except FileNotFoundError:
         abort(404)
     try:
-        report = analysis.field_usage(conn)
-        # Surface each complex (object) field as a single navigational parent row
-        # (e.g. dates[]) that links to its object view, sorted in among its member
-        # leaves. This replaces per-member "object" chips with one row per object.
-        total = manifest.get("doc_count") or 0
-        for summary in analysis.object_field_summaries(conn):
-            prefix = summary["object_prefix"]
-            report.append(
-                {
-                    "path": prefix,
-                    "is_object": True,
-                    "value_type": "object",
-                    "doc_count": summary["doc_count"],
-                    "coverage_pct": (
-                        round(100 * summary["doc_count"] / total, 1) if total else 0.0
-                    ),
-                    "distinct_values": summary["instance_count"],
-                    "value_count": summary["instance_count"],
-                    "pct_unique": None,
-                    "sample_value": ", ".join(
-                        _member_label(m, prefix) for m in summary["members"]
-                    ),
-                }
-            )
+        # One row per top-level field, typed (string / array[string] / object /
+        # array[object]); complex fields drill into the object view, scalar fields
+        # into the values view. Member/leaf detail lives in the drill, not here.
+        report = analysis.top_level_fields(conn)
     finally:
         conn.close()
-    report.sort(key=lambda r: r["path"])
     return render_template(
         "analysis_detail.html",
         analysis_id=analysis_id,
@@ -367,14 +346,20 @@ def _member_label(member_path: str, object_prefix: str) -> str:
 def _object_request() -> tuple[str, str, str | None]:
     """Parse the object-drill request into ``(object_prefix, path, value)``.
 
-    ``path`` is a member path (e.g. ``dates[].kind``); ``object_prefix`` is its
-    collapsed parent (``dates[]``). An absent ``value`` means the unfiltered view
-    (every object instance under the prefix), so ``None`` is preserved -- distinct
-    from a present-but-empty value.
+    Two entry points share this route:
+
+    - *Value-filtered* (from the values view): ``path`` is a member leaf (e.g.
+      ``dates[].kind``) and ``value`` is set; the object prefix is the leaf's
+      collapsed parent (``dates[]``).
+    - *Unfiltered* (from the root schema table): ``value`` is absent and ``path``
+      is the object prefix itself (e.g. ``subjects[]`` or a non-array ``citation``).
+
+    ``None`` value is preserved -- distinct from a present-but-empty value.
     """
     path = request.args.get("path", default="", type=str)
     value = request.args.get("value", default=None, type=str)
-    return _collapsed_object_prefix(path), path, value
+    object_prefix = path if value is None else _collapsed_object_prefix(path)
+    return object_prefix, path, value
 
 
 def _object_columns(
@@ -411,6 +396,8 @@ def object_page(analysis_id: str) -> str:
         abort(404)
     try:
         _, columns = _object_columns(conn, object_prefix, path, value)
+        # Schema/shape of the complex field: per-member type + per-object counts.
+        member_stats = analysis.object_member_stats(conn, object_prefix)
     finally:
         conn.close()
     return render_template(
@@ -420,6 +407,7 @@ def object_page(analysis_id: str) -> str:
         value=value,
         object_prefix=object_prefix,
         columns=columns,
+        member_stats=member_stats,
     )
 
 

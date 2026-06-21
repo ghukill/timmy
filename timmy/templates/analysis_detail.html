@@ -169,11 +169,19 @@
         font-weight: 600;
       }
       a.obj-field::after {
-        content: " \25B8 objects";
+        content: " \25B8";
         font-family: system-ui, sans-serif;
         font-size: 0.7rem;
         font-weight: 400;
         color: #9b7fd0;
+      }
+      /* Inferred python-style type; complex (object) types stand out. */
+      span.ftype {
+        color: #777;
+      }
+      span.ftype.complex {
+        color: #6b3fb3;
+        font-weight: 600;
       }
       .cov {
         display: flex;
@@ -267,14 +275,16 @@
     </section>
 
     <section>
-      <h2>Field-usage report</h2>
+      <h2>Schema overview</h2>
       <p style="font-size: 0.85rem; color: #555">
-        Coverage of each flattened path across the
-        {{ "{:,}".format(manifest.doc_count) }} docs in this corpus &mdash; the
-        share of docs that populate the field. Rows where
-        <strong>every</strong> doc has a value are tinted green. Per-field value
-        drill-down is the next layer; for value-level questions use the SQL
-        console below.
+        One row per top-level field across the
+        {{ "{:,}".format(manifest.doc_count) }} docs in this corpus, with its
+        inferred type. <strong>Complex</strong> fields
+        (<code>array[object]</code>, <code>object</code>) drill into the object
+        view to see member structure; scalar fields drill into their values.
+        <em>per record</em> is the field's cardinality within a single record
+        (min&nbsp;/&nbsp;avg&nbsp;/&nbsp;max). Fields every doc populates are
+        tinted green.
       </p>
       {% if not report %}
       <p class="empty">No fields &mdash; this corpus produced no flattened rows.</p>
@@ -283,34 +293,31 @@
         <table class="report" id="report" style="width: 100%">
           <thead>
             <tr>
-              <th>path</th>
+              <th>field</th>
               <th>type</th>
               <th>coverage</th>
-              <th class="num">distinct values</th>
-              <th class="num">% unique</th>
-              <th>sample</th>
+              <th class="num" title="Cardinality within a single record: min / avg / max. Shown for array fields.">per record</th>
+              <th class="num">distinct</th>
+              <th>sample / members</th>
             </tr>
           </thead>
           <tbody>
             {% for f in report %}
             <tr class="{{ 'full' if f.coverage_pct == 100 else '' }}">
               <td>
-                {% if f.is_object %}
+                {% if f.is_complex %}
                 <a
                   class="obj-field"
-                  title="View all {{ f.path }} objects"
-                  href="{{ url_for('analysis.object_page', analysis_id=analysis_id, path=f.path) }}"
-                  >{{ f.path }}</a
+                  title="Drill into {{ f.field }} objects"
+                  href="{{ url_for('analysis.object_page', analysis_id=analysis_id, path=f.drill_path) }}"
+                  >{{ f.field }}</a
                 >
                 {% else %}
-                <a href="{{ url_for('analysis.values', analysis_id=analysis_id, prefix=f.path) }}">{{ f.path }}</a>
+                <a href="{{ url_for('analysis.values', analysis_id=analysis_id, prefix=f.drill_path) }}">{{ f.field }}</a>
                 {% endif %}
               </td>
-              <td>{{ f.value_type }}</td>
-              {# Nudge a parent object's sort value just above its tied children
-                 (its coverage is always >= theirs) so it sorts first on a tie,
-                 without changing the displayed 0.1%-rounded percentage. #}
-              <td data-order="{{ (f.coverage_pct + 0.01) | round(2) if f.is_object else f.coverage_pct }}">
+              <td><span class="ftype {{ 'complex' if f.is_complex else '' }}">{{ f.type }}</span></td>
+              <td data-order="{{ f.coverage_pct }}">
                 <div class="cov">
                   <div class="cov-bar">
                     <div class="cov-fill" style="width: {{ f.coverage_pct }}%"></div>
@@ -319,11 +326,12 @@
                   <span class="cov-count">{{ f.doc_count }}/{{ manifest.doc_count }}</span>
                 </div>
               </td>
-              <td class="num" data-order="{{ f.distinct_values }}">
-                {{ "{:,}".format(f.distinct_values) }}
+              <td class="num" data-order="{{ f.count_max if f.is_array else -1 }}">
+                {% if f.is_array %}{{ f.count_min }} / {{ f.count_avg }} / {{ f.count_max }}{% endif %}
               </td>
-              <td class="num" data-order="{{ f.pct_unique if f.pct_unique is not none else -1 }}">
-                {% if f.pct_unique is not none %}{{ f.pct_unique }}%{% endif %}
+              <td class="num" data-order="{{ f.distinct_values }}">
+                {{ "{:,}".format(f.distinct_values) }}{% if f.is_complex %}
+                <span class="cov-count">objects</span>{% endif %}
               </td>
               <td class="sample" title="{{ f.sample_value if f.sample_value is not none else '' }}">
                 {{ f.sample_value if f.sample_value is not none else "" }}
@@ -368,14 +376,14 @@
       if (document.getElementById("report")) {
         new DataTable("#report", {
           order: [[2, "desc"]], // coverage desc (the default at-a-glance view)
-          // The field list is bounded (tens of paths), so show every field by
-          // default -- the whole metadata profile at a glance, no paging.
+          // The field list is bounded (tens of fields), so show every field by
+          // default -- the whole schema at a glance, no paging.
           pageLength: -1,
           lengthMenu: [
             [-1, 100, 50, 25],
             ["All", 100, 50, 25],
           ],
-          columnDefs: [{ targets: 5, orderable: false }], // sample
+          columnDefs: [{ targets: 5, orderable: false }], // sample / members
         });
       }
 

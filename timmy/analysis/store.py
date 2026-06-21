@@ -287,18 +287,31 @@ def build_analysis(
 
 # Per-path coverage stats for the field-usage report. mode() picks the dominant
 # value_type for a path; distinct value count ignores nulls; sample is a
-# deterministic non-null value.
+# deterministic non-null value. The ``count_*`` columns describe how many times a
+# path occurs *within a single doc* (min/avg/max) -- the array-cardinality of the
+# field, which for a scalar non-array path is always 1 but for an array-nested
+# path (anything containing ``[]``) tells you how big it gets per record.
 FIELD_USAGE_SQL = """
+with per_doc as (
+    select path, timdex_composite_id, count(*) as c
+    from eav group by path, timdex_composite_id
+),
+count_stats as (
+    select path, min(c) as count_min, avg(c) as count_avg, max(c) as count_max
+    from per_doc group by path
+)
 select
-    path,
-    mode() within group (order by value_type) as value_type,
-    count(distinct timdex_composite_id) as doc_count,
-    count(distinct value) as distinct_values,
-    count(value) as value_count,
-    min(value) filter (where value is not null) as sample_value
-from eav
-group by path
-order by doc_count desc, path
+    e.path,
+    mode() within group (order by e.value_type) as value_type,
+    count(distinct e.timdex_composite_id) as doc_count,
+    count(distinct e.value) as distinct_values,
+    count(e.value) as value_count,
+    min(e.value) filter (where e.value is not null) as sample_value,
+    cs.count_min, cs.count_avg, cs.count_max
+from eav e
+join count_stats cs using (path)
+group by e.path, cs.count_min, cs.count_avg, cs.count_max
+order by doc_count desc, e.path
 """
 
 
@@ -307,7 +320,8 @@ def field_usage(conn: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
 
     Coverage is the share of the corpus's docs that have at least one value at
     that path (``doc_count / total docs``), so 100% means every doc populates
-    the field.
+    the field. ``count_min/avg/max`` give the per-doc occurrence count (the
+    array-cardinality of the field within a record).
     """
     total = conn.execute("select count(*) from docs").fetchone()[0]
     report = []
@@ -318,6 +332,9 @@ def field_usage(conn: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
         distinct_values,
         value_count,
         sample_value,
+        count_min,
+        count_avg,
+        count_max,
     ) in conn.execute(FIELD_USAGE_SQL).fetchall():
         report.append(
             {
@@ -335,6 +352,12 @@ def field_usage(conn: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
                     if value_count
                     else None
                 ),
+                # Per-record occurrence count (array cardinality). Only varies for
+                # array-nested paths; the template shows it for those.
+                "count_min": count_min,
+                "count_avg": round(count_avg, 2) if count_avg is not None else None,
+                "count_max": count_max,
+                "is_array": "[" in path,
             }
         )
     return report
@@ -412,7 +435,12 @@ def _instance_expr(col: str, depth: int) -> str:
     ``subjects[3]`` too, so members join to their instance by equality. A path with
     fewer than ``depth`` brackets fails the match and is returned unchanged, so it
     can never collide with a real instance key.
+
+    Depth 0 -- a non-array (single) object like ``citation`` -- has no array index,
+    so every leaf collapses to one instance per doc (the constant ``''``).
     """
+    if depth <= 0:
+        return "''"
     return rf"regexp_replace({col}, '^((?:[^\]]*\]){{{depth}}}).*$', '\1')"
 
 
@@ -495,10 +523,19 @@ def object_rows(
     all_cols = OBJECT_IDENTITY_COLUMNS + value_cols
 
     leaf_inst = _instance_expr("e.path_indexed", object_prefix.count("]"))
-    # One string_agg per member field; the path is bound as a parameter.
+    # One string_agg per member field; the path is bound as a parameter. Array
+    # members (path ending in ``[]``) render as a bracketed list -- ``[a, b, c]``
+    # -- so a multi-valued field reads as the array it is; scalar members stay
+    # bare. A null agg (member absent in the instance) yields a null cell either
+    # way (`'[' || NULL || ']'` is NULL), shown blank.
     pivots = ",\n".join(
-        f"string_agg(case when e.path = ? then e.value end, ' | ') as {col}"
-        for col in value_cols
+        (
+            f"'[' || string_agg(case when e.path = ? then e.value end, ', ') || ']'"
+            f" as {col}"
+            if mpath.endswith("[]")
+            else f"string_agg(case when e.path = ? then e.value end, ', ') as {col}"
+        )
+        for col, mpath in zip(value_cols, member_paths, strict=True)
     )
     pivot_params = list(member_paths)
     hits_sql, hit_params = _object_hits(object_prefix, value_path, value)
@@ -554,15 +591,57 @@ def object_rows(
     )
 
 
+# Separators for an object instance's identity signature. An object's identity
+# is the *set* of (member path, value) pairs it carries, so two instances are the
+# "same object" when they hold the same leaves regardless of array order or
+# duplicated leaves. \x1f (unit) joins a pair, \x1e (record) joins pairs; both are
+# control chars that never occur in real metadata, so they can't collide with
+# content. A null value is encoded as \x00 so present-but-null stays distinct from
+# a different value at the same path.
+_SIG_PAIR = r"path || '\x1f' || coalesce(value, '\x00')"
+
+
+def distinct_object_count(
+    conn: duckdb.DuckDBPyConnection, object_prefix: str
+) -> int:
+    """Count distinct object *instances* under ``object_prefix`` by content.
+
+    Unlike ``instance_count`` (every occurrence), this collapses instances that
+    carry the same set of member (path, value) pairs -- the true number of
+    distinct objects. The signature uses collapsed ``path`` (not ``path_indexed``)
+    so positional indices within an inner array don't make otherwise-identical
+    objects look different.
+    """
+    scope_sql, scope_params = _scope_clause(object_prefix)
+    inst = _instance_expr("path_indexed", object_prefix.count("]"))
+    return conn.execute(
+        f"""
+        with leaves as (
+            select distinct timdex_composite_id, {inst} as elem,
+                   {_SIG_PAIR} as pair
+            from eav where {scope_sql}
+        ),
+        sigs as (
+            select timdex_composite_id, elem,
+                   string_agg(pair, '\x1e' order by pair) as sig
+            from leaves group by timdex_composite_id, elem
+        )
+        select count(distinct sig) from sigs
+        """,  # noqa: S608 -- only constant SQL text is interpolated
+        scope_params,
+    ).fetchone()[0]
+
+
 def object_field_summaries(
     conn: duckdb.DuckDBPyConnection,
 ) -> list[dict[str, Any]]:
     """One summary per complex (object) field, for the field-usage report.
 
     Each entry is a navigational parent -- the collapsed object prefix (e.g.
-    ``dates[]``), how many docs carry it, how many object instances exist, and its
-    member-field paths -- so the report can surface the whole object as a single
-    clickable row above its member leaves.
+    ``dates[]``), how many docs carry it, how many object instances exist
+    (``instance_count``, every occurrence) and how many are distinct by content
+    (``distinct_objects``), plus its member-field paths -- so the report can
+    surface the whole object as a single clickable row above its member leaves.
     """
     prefixes = sorted({_collapsed_prefix(p) for p in object_field_paths(conn)})
     summaries = []
@@ -579,15 +658,228 @@ def object_field_summaries(
             f"{inst} as elem from eav where {scope_sql})",
             scope_params,
         ).fetchone()[0]
+        # Nodes-per-doc: how many object instances a record carries (the array
+        # cardinality of the complex field), min/avg/max across docs that have it.
+        node_min, node_avg, node_max = conn.execute(
+            f"select min(n), avg(n), max(n) from (select timdex_composite_id, "  # noqa: S608
+            f"count(distinct {inst}) as n from eav where {scope_sql} group by 1)",
+            scope_params,
+        ).fetchone()
         summaries.append(
             {
                 "object_prefix": prefix,
                 "doc_count": doc_count,
                 "instance_count": instance_count,
+                "distinct_objects": distinct_object_count(conn, prefix),
+                "node_min": node_min,
+                "node_avg": round(node_avg, 2) if node_avg is not None else None,
+                "node_max": node_max,
                 "members": object_columns(conn, prefix),
             }
         )
     return summaries
+
+
+def object_member_stats(
+    conn: duckdb.DuckDBPyConnection, object_prefix: str
+) -> list[dict[str, Any]]:
+    """Per-member schema/shape table for a complex field's object instances.
+
+    One row per member leaf path under ``object_prefix`` (e.g. ``subjects[].kind``,
+    ``subjects[].value[]``), describing -- *within a single object instance* -- the
+    dominant value type, how many instances carry the member (``presence_pct``), and
+    the min/avg/max count of that member per instance. A scalar member reads 1/1/1;
+    an array member (path ending in ``[]``) shows its real spread (e.g. value[]
+    1/1.71/222), which is what paints the structure of the complex field.
+    """
+    scope_sql, scope_params = _scope_clause(object_prefix)
+    inst = _instance_expr("path_indexed", object_prefix.count("]"))
+    total = conn.execute(
+        f"select count(*) from (select distinct timdex_composite_id, "  # noqa: S608
+        f"{inst} as elem from eav where {scope_sql})",
+        scope_params,
+    ).fetchone()[0]
+    rows = conn.execute(
+        f"""
+        with per_inst as (
+            select path, timdex_composite_id, {inst} as elem, count(*) as c
+            from eav where {scope_sql}
+            group by path, timdex_composite_id, elem
+        ),
+        types as (
+            select path, mode() within group (order by value_type) as value_type
+            from eav where {scope_sql} group by path
+        )
+        select p.path, t.value_type,
+               count(*) as present, min(p.c) as cmin, avg(p.c) as cavg, max(p.c) as cmax
+        from per_inst p join types t using (path)
+        group by p.path, t.value_type
+        order by p.path
+        """,  # noqa: S608 -- only constant SQL text is interpolated
+        [*scope_params, *scope_params],
+    ).fetchall()
+    return [
+        {
+            "path": path,
+            "label": _member_label(path, object_prefix),
+            "value_type": value_type,
+            "is_array": path.endswith("[]"),
+            # python-style type, e.g. ``string`` or ``array[string]``.
+            "type": (
+                f"array[{_py_type(value_type)}]"
+                if path.endswith("[]")
+                else _py_type(value_type)
+            ),
+            "present": present,
+            "presence_pct": round(100 * present / total, 1) if total else 0.0,
+            "count_min": cmin,
+            "count_avg": round(cavg, 2) if cavg is not None else None,
+            "count_max": cmax,
+        }
+        for (path, value_type, present, cmin, cavg, cmax) in rows
+    ]
+
+
+# A path's top-level field name: everything before the first ``.`` or ``[``.
+# ``subjects[].kind`` -> ``subjects``; ``citation.year`` -> ``citation``;
+# ``title`` -> ``title``.
+_FIELD_EXPR = r"regexp_replace({col}, '^([^.\[]+).*$', '\1')"
+
+# A path_indexed's top-level array element: the field name plus its first
+# ``[index]`` if present. ``subjects[0].value[5]`` -> ``subjects[0]``;
+# ``summary[3]`` -> ``summary[3]``; ``citation.year`` -> ``citation``. Counting
+# distinct values of this per doc gives the top-level array cardinality.
+_TOP_ELEM_EXPR = r"regexp_replace({col}, '^([^.\[]+(\[[0-9]+\])?).*$', '\1')"
+
+# JSON-leaf value_type -> python-style type name for the schema overview.
+_PY_TYPE = {
+    "string": "string",
+    "number": "number",
+    "boolean": "boolean",
+    "null": "null",
+    "object-empty": "object",
+    "array-empty": "array",
+}
+
+
+def _py_type(value_type: str | None) -> str:
+    """Map a stored ``value_type`` to its python-style name (default: as-is)."""
+    return _PY_TYPE.get(value_type or "", value_type or "null")
+
+
+def top_level_fields(conn: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
+    """One row per top-level field for the schema-overview report.
+
+    Each field is classified into a python-style ``type`` -- ``string`` /
+    ``array[string]`` / ``object`` / ``array[object]`` (and number/boolean) --
+    inferred from the shapes of its EAV paths. Complex types (``object`` /
+    ``array[object]``) carry the object ``prefix`` + member list so the row links
+    to the object drill; scalar types carry the leaf ``path`` so the row links to
+    the values view. ``count_*`` is the per-record cardinality (array length, or
+    object-instance count); ``distinct_values`` is distinct objects for complex
+    fields and distinct values otherwise.
+    """
+    total = conn.execute("select count(*) from docs").fetchone()[0]
+    field_col = _FIELD_EXPR.format(col="path")
+    top_elem = _TOP_ELEM_EXPR.format(col="path_indexed")
+
+    # Classify every distinct path into a field; a field is an array if any of its
+    # paths brackets right after the name, an object if any path descends via '.'.
+    classified = conn.execute(
+        f"""
+        with fielded as (
+            select path, {field_col} as field
+            from (select distinct path from eav)
+        )
+        select field,
+               bool_or(starts_with(path, field || '[')) as is_array,
+               bool_or(position('.' in path) > 0) as is_object
+        from fielded
+        group by field
+        """  # noqa: S608 -- only constant SQL text is interpolated
+    ).fetchall()
+
+    fields = []
+    for field, is_array, is_object in classified:
+        scope_sql, scope_params = _scope_clause(field)
+        doc_count = conn.execute(
+            f"select count(distinct timdex_composite_id) from eav "  # noqa: S608
+            f"where {scope_sql}",
+            scope_params,
+        ).fetchone()[0]
+        count_min, count_avg, count_max = conn.execute(
+            f"select min(n), avg(n), max(n) from (select timdex_composite_id, "  # noqa: S608
+            f"count(distinct {top_elem}) as n from eav where {scope_sql} group by 1)",
+            scope_params,
+        ).fetchone()
+
+        if is_object:
+            prefix = f"{field}[]" if is_array else field
+            type_label = "array[object]" if is_array else "object"
+            members = object_columns(conn, prefix)
+            fields.append(
+                {
+                    "field": field,
+                    "type": type_label,
+                    "is_complex": True,
+                    "is_array": is_array,
+                    "prefix": prefix,
+                    "drill_path": prefix,
+                    "doc_count": doc_count,
+                    "coverage_pct": round(100 * doc_count / total, 1) if total else 0.0,
+                    "count_min": count_min,
+                    "count_avg": round(count_avg, 2) if count_avg is not None else None,
+                    "count_max": count_max,
+                    "distinct_values": distinct_object_count(conn, prefix),
+                    "sample_value": ", ".join(
+                        _member_label(m, prefix) for m in members
+                    ),
+                    "members": members,
+                }
+            )
+            continue
+
+        # Scalar field: a single leaf path (``field`` or ``field[]``).
+        leaf_path = f"{field}[]" if is_array else field
+        elem_type = conn.execute(
+            "select mode() within group (order by value_type) from eav where path = ?",
+            [leaf_path],
+        ).fetchone()[0]
+        py = _py_type(elem_type)
+        distinct_values, sample_value = conn.execute(
+            "select count(distinct value), "
+            "min(value) filter (where value is not null) from eav where path = ?",
+            [leaf_path],
+        ).fetchone()
+        fields.append(
+            {
+                "field": field,
+                "type": f"array[{py}]" if is_array else py,
+                "is_complex": False,
+                "is_array": is_array,
+                "prefix": None,
+                "drill_path": leaf_path,
+                "doc_count": doc_count,
+                "coverage_pct": round(100 * doc_count / total, 1) if total else 0.0,
+                "count_min": count_min,
+                "count_avg": round(count_avg, 2) if count_avg is not None else None,
+                "count_max": count_max,
+                "distinct_values": distinct_values,
+                "sample_value": sample_value,
+                "members": [],
+            }
+        )
+
+    fields.sort(key=lambda f: (-f["doc_count"], f["field"]))
+    return fields
+
+
+def _member_label(member_path: str, object_prefix: str) -> str:
+    """Object-relative label for a member field: ``subjects[].value[]`` ->
+    ``value[]`` under prefix ``subjects[]``. Falls back to the full path."""
+    if object_prefix and member_path.startswith(object_prefix):
+        return member_path[len(object_prefix):].lstrip(".") or member_path
+    return member_path
 
 
 def _scope_clause(prefix: str) -> tuple[str, list]:
