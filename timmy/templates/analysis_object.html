@@ -32,7 +32,9 @@
         color: #555;
       }
       table#object th,
-      table#object td {
+      table#object td,
+      table#byrecord th,
+      table#byrecord td {
         font-family: ui-monospace, monospace;
         font-size: 0.8rem;
       }
@@ -130,6 +132,27 @@
       </tbody>
     </table>
 
+    {% if show_record_shape %}
+    <h2 class="sub">By record</h2>
+    <p class="lead">
+      One row per record carrying this field: how many objects it has
+      (<code>objects</code>), the total member values across them
+      (<code>total values</code>), and the fullest single object
+      (<code>max / object</code>). Sort <code>objects</code> descending to find the
+      record with the most.
+    </p>
+    <table id="byrecord" class="display" style="width: 100%">
+      <thead>
+        <tr>
+          <th>record</th>
+          <th>objects</th>
+          <th>total values</th>
+          <th>max / object</th>
+        </tr>
+      </thead>
+    </table>
+    {% endif %}
+
     <h2 class="sub">Objects</h2>
     {% endif %}
 
@@ -200,6 +223,40 @@
         lengthMenu: [10, 25, 50, 100],
         columns: columns,
       });
+
+      // The per-record shape table (unfiltered drill only). Defaults to objects
+      // desc so the record carrying the most instances surfaces first.
+      if (document.getElementById("byrecord")) {
+        new DataTable("#byrecord", {
+          serverSide: true,
+          processing: true,
+          ajax: {
+            url: "{{ url_for('analysis.object_records_data', analysis_id=analysis_id) }}",
+            data: function (d) {
+              d.path = PATH; // unfiltered -> path is the object prefix
+            },
+          },
+          orderMulti: false,
+          order: [[1, "desc"]], // objects desc
+          pageLength: 25,
+          lengthMenu: [10, 25, 50, 100],
+          columns: [
+            {
+              data: "timdex_record_id",
+              render: function (data, type, row) {
+                if (type !== "display" || data === null) return data;
+                const a = document.createElement("a");
+                a.href = recordHref(data, row.run_id, row.run_record_offset);
+                a.textContent = data;
+                return a.outerHTML;
+              },
+            },
+            { data: "objects" },
+            { data: "total_values" },
+            { data: "max_per_object" },
+          ],
+        });
+      }
     </script>
   </body>
 </html>

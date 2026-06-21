@@ -295,6 +295,16 @@ def values(analysis_id: str) -> str:
     try:
         # Paths whose parent is a complex (object) field get an "object" drill.
         object_path_set = analysis.object_field_paths(conn)
+        # A scalar array field (path ending in ``[]`` that is itself a stored leaf,
+        # e.g. ``content_type[]`` or ``subjects[].value[]``) gets a per-record
+        # element-count table. Object prefixes like ``subjects[]`` are not stored
+        # paths, so they don't match.
+        is_scalar_array = bool(
+            prefix.endswith("[]")
+            and conn.execute(
+                "select 1 from eav where path = ? limit 1", [prefix]
+            ).fetchone()
+        )
     finally:
         conn.close()
     # When the page is scoped to one member path of an object field, offer a link
@@ -309,6 +319,7 @@ def values(analysis_id: str) -> str:
         columns=analysis.PATH_VALUE_COLUMNS,
         object_paths=sorted(object_path_set),
         object_prefix=object_prefix,
+        record_count_path=prefix if is_scalar_array else None,
     )
 
 
@@ -321,6 +332,24 @@ def values_data(analysis_id: str):
         analysis.PATH_VALUE_COLUMNS,
         lambda conn, search, oc, od, limit, offset: analysis.path_values(
             conn, prefix, search=search, order_col=oc, order_dir=od,
+            limit=limit, offset=offset,
+        ),
+    )
+
+
+@analysis_bp.get("/<analysis_id>/values/records/data")
+def values_records_data(analysis_id: str):
+    """DataTables endpoint for the per-record element-count table of a scalar
+    array field (one row per record carrying the path)."""
+    path = request.args.get("path", default="", type=str)
+    # Displayed columns only (record link + count); identity columns ride along in
+    # the row dicts for the link.
+    display_cols = ["timdex_record_id", "element_count"]
+    return _table_data(
+        analysis_id,
+        display_cols,
+        lambda conn, search, oc, od, limit, offset: analysis.path_record_counts(
+            conn, path, search=search, order_col=oc, order_dir=od,
             limit=limit, offset=offset,
         ),
     )
@@ -408,6 +437,9 @@ def object_page(analysis_id: str) -> str:
         object_prefix=object_prefix,
         columns=columns,
         member_stats=member_stats,
+        # The per-record shape table is a field-level overview, so only on the
+        # unfiltered drill (not the value-scoped view).
+        show_record_shape=value is None,
     )
 
 
@@ -435,6 +467,29 @@ def object_data(analysis_id: str):
         lambda conn, search, oc, od, limit, offset: analysis.object_rows(
             conn, object_prefix, member_paths, value_path=path, value=value,
             search=search, order_col=oc, order_dir=od, limit=limit, offset=offset,
+        ),
+    )
+
+
+@analysis_bp.get("/<analysis_id>/object/records/data")
+def object_records_data(analysis_id: str):
+    """DataTables endpoint for the per-record shape table of an object field.
+
+    One row per record under the (unfiltered) object prefix, with its object-node
+    count and value spread -- sort ``objects`` desc to find the record carrying
+    the most instances.
+    """
+    object_prefix, _path, _value = _object_request()
+    # Displayed columns (positional, for the order-index whitelist). The row dicts
+    # still carry run_id/run_record_offset for the record link; those just aren't
+    # shown as their own columns.
+    display_cols = ["timdex_record_id", "objects", "total_values", "max_per_object"]
+    return _table_data(
+        analysis_id,
+        display_cols,
+        lambda conn, search, oc, od, limit, offset: analysis.object_record_shape(
+            conn, object_prefix, search=search, order_col=oc, order_dir=od,
+            limit=limit, offset=offset,
         ),
     )
 

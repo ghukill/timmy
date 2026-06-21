@@ -15,6 +15,8 @@ from timmy.analysis.flatten import (
 )
 from timmy.analysis.store import (
     OBJECT_IDENTITY_COLUMNS,
+    OBJECT_RECORD_COLUMNS,
+    PATH_RECORD_COLUMNS,
     PATH_VALUE_COLUMNS,
     VALUE_RECORD_COLUMNS,
     build_analysis,
@@ -26,8 +28,10 @@ from timmy.analysis.store import (
     object_field_paths,
     object_field_summaries,
     object_member_stats,
+    object_record_shape,
     object_rows,
     open_analysis,
+    path_record_counts,
     path_values,
     read_manifest,
     top_level_fields,
@@ -37,6 +41,8 @@ from timmy.analysis.store import (
 
 __all__ = [
     "OBJECT_IDENTITY_COLUMNS",
+    "OBJECT_RECORD_COLUMNS",
+    "PATH_RECORD_COLUMNS",
     "PATH_VALUE_COLUMNS",
     "VALUE_RECORD_COLUMNS",
     "EAVRow",
@@ -53,8 +59,10 @@ __all__ = [
     "object_field_paths",
     "object_field_summaries",
     "object_member_stats",
+    "object_record_shape",
     "object_rows",
     "open_analysis",
+    "path_record_counts",
     "path_values",
     "read_manifest",
     "top_level_fields",

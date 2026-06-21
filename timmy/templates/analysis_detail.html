@@ -215,6 +215,17 @@
         font-size: 0.7rem;
         white-space: nowrap;
       }
+      /* Keep the min/avg/max triplet on one line; dim the separators. */
+      th.shape-col {
+        white-space: nowrap;
+      }
+      td.shape-col .shape {
+        white-space: nowrap;
+      }
+      td.shape-col .sep {
+        color: #ccc;
+        margin: 0 0.25rem;
+      }
       td.sample {
         max-width: 280px;
         overflow: hidden;
@@ -296,7 +307,7 @@
               <th>field</th>
               <th>type</th>
               <th>coverage</th>
-              <th class="num" title="Cardinality within a single record: min / avg / max. Shown for array fields.">per record</th>
+              <th class="num shape-col" title="Cardinality within a single record: min / avg / max. Shown for array fields.">Counts per Record</th>
               <th class="num">distinct</th>
               <th>sample / members</th>
             </tr>
@@ -326,8 +337,10 @@
                   <span class="cov-count">{{ f.doc_count }}/{{ manifest.doc_count }}</span>
                 </div>
               </td>
-              <td class="num" data-order="{{ f.count_max if f.is_array else -1 }}">
-                {% if f.is_array %}{{ f.count_min }} / {{ f.count_avg }} / {{ f.count_max }}{% endif %}
+              <td class="num shape-col" data-order="{{ f.count_max if f.is_array else -1 }}">
+                {% if f.is_array %}<span class="shape"
+                  >{{ f.count_min }}<span class="sep">/</span>{{ f.count_avg }}<span class="sep">/</span>{{ f.count_max }}</span
+                >{% endif %}
               </td>
               <td class="num" data-order="{{ f.distinct_values }}">
                 {{ "{:,}".format(f.distinct_values) }}{% if f.is_complex %}

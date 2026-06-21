@@ -31,9 +31,17 @@
         color: #555;
       }
       table#values th,
-      table#values td {
+      table#values td,
+      table#byrecord th,
+      table#byrecord td {
         font-family: ui-monospace, monospace;
         font-size: 0.8rem;
+      }
+      h2.sub {
+        font-size: 1.05rem;
+        border-bottom: 1px solid #ddd;
+        padding-bottom: 0.25rem;
+        margin-top: 2.5rem;
       }
       a.objlink {
         font-family: system-ui, sans-serif;
@@ -90,16 +98,48 @@
       </thead>
     </table>
 
+    {% if record_count_path %}
+    <h2 class="sub">By record</h2>
+    <p class="lead">
+      One row per record carrying <code>{{ record_count_path }}</code>, with how
+      many elements it has. Sort <code>count</code> descending to find the record
+      with the most.
+    </p>
+    <table id="byrecord" class="display" style="width: 100%">
+      <thead>
+        <tr>
+          <th>record</th>
+          <th>count</th>
+        </tr>
+      </thead>
+    </table>
+    {% endif %}
+
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
     <script src="https://cdn.datatables.net/2.1.8/js/dataTables.min.js"></script>
     <script>
       const PREFIX = {{ prefix | tojson }};
+      const RECORD_COUNT_PATH = {{ record_count_path | tojson }};
       const RECORDS_DRILL =
         "{{ url_for('analysis.value_records_page', analysis_id=analysis_id) }}";
       const OBJECT_DRILL =
         "{{ url_for('analysis.object_page', analysis_id=analysis_id) }}";
+      // Base for record links: /record/<id>/<run_id>/<offset> (exact version).
+      const RECORD_BASE =
+        "{{ url_for('main.records') }}".replace(/records$/, "record/");
       // Paths whose parent is a complex (object) field -> offer an object drill.
       const OBJECT_PATHS = new Set({{ object_paths | tojson }});
+
+      function recordHref(id, runId, offset) {
+        return (
+          RECORD_BASE +
+          encodeURIComponent(id) +
+          "/" +
+          encodeURIComponent(runId) +
+          "/" +
+          encodeURIComponent(offset)
+        );
+      }
 
       function drillHref(base, path, value) {
         return (
@@ -157,6 +197,38 @@
           },
         ],
       });
+
+      // Per-record element-count table (only for scalar array paths). Defaults to
+      // count desc so the record with the most elements surfaces first.
+      if (document.getElementById("byrecord")) {
+        new DataTable("#byrecord", {
+          serverSide: true,
+          processing: true,
+          ajax: {
+            url: "{{ url_for('analysis.values_records_data', analysis_id=analysis_id) }}",
+            data: function (d) {
+              d.path = RECORD_COUNT_PATH;
+            },
+          },
+          orderMulti: false,
+          order: [[1, "desc"]], // count desc
+          pageLength: 25,
+          lengthMenu: [10, 25, 50, 100],
+          columns: [
+            {
+              data: "timdex_record_id",
+              render: function (data, type, row) {
+                if (type !== "display" || data === null) return data;
+                const a = document.createElement("a");
+                a.href = recordHref(data, row.run_id, row.run_record_offset);
+                a.textContent = data;
+                return a.outerHTML;
+              },
+            },
+            { data: "element_count" },
+          ],
+        });
+      }
     </script>
   </body>
 </html>

@@ -369,6 +369,18 @@ PATH_VALUE_COLUMNS = ["path", "value", "documents", "occurrences", "pct_of_path"
 # Columns for the value -> records drill (server-side paginated).
 VALUE_RECORD_COLUMNS = ["timdex_record_id", "source", "run_id", "run_record_offset"]
 
+# Columns for the per-record shape table of a complex (object) field: one row per
+# record with how many object instances it carries and the value spread within.
+OBJECT_RECORD_COLUMNS = [
+    "timdex_record_id", "source", "run_id", "run_record_offset",
+    "objects", "total_values", "max_per_object",
+]
+
+# Columns for the per-record element-count table of a scalar array field.
+PATH_RECORD_COLUMNS = [
+    "timdex_record_id", "source", "run_id", "run_record_offset", "element_count",
+]
+
 # Identity columns carried alongside the dynamic member-field columns in the
 # object table (the first is rendered as a link to the record).
 OBJECT_IDENTITY_COLUMNS = ["timdex_record_id", "run_id", "run_record_offset"]
@@ -1002,6 +1014,125 @@ def value_records(
         total,
         filtered,
         [dict(zip(VALUE_RECORD_COLUMNS, r, strict=True)) for r in rows],
+    )
+
+
+def object_record_shape(
+    conn: duckdb.DuckDBPyConnection,
+    object_prefix: str,
+    *,
+    search: str = "",
+    order_col: str = "objects",
+    order_dir: str = "desc",
+    limit: int = 25,
+    offset: int = 0,
+) -> tuple[int, int, list[dict[str, Any]]]:
+    """Per-record shape of a complex field: one row per record under the prefix.
+
+    ``objects`` is how many object instances the record carries (the array node
+    count -- sort this desc to find the record with the most), ``total_values`` is
+    the total non-null member values across those objects, and ``max_per_object``
+    is the fullest single object. Returns ``(total, filtered, rows)`` for
+    server-side pagination.
+    """
+    scope_sql, scope_params = _scope_clause(object_prefix)
+    inst = _instance_expr("path_indexed", object_prefix.count("]"))
+    base = f"""
+        with per_inst as (
+            select timdex_composite_id, {inst} as elem,
+                   count(*) filter (where value is not null) as vc
+            from eav where {scope_sql}
+            group by timdex_composite_id, elem
+        ),
+        per_rec as (
+            select timdex_composite_id,
+                   count(*) as objects,
+                   coalesce(sum(vc), 0) as total_values,
+                   coalesce(max(vc), 0) as max_per_object
+            from per_inst group by timdex_composite_id
+        )
+        select d.timdex_record_id, d.source, d.run_id, d.run_record_offset,
+               r.objects, r.total_values, r.max_per_object
+        from per_rec r join docs d using (timdex_composite_id)
+    """  # noqa: S608 -- scope_sql/inst are constant text; values are parameters
+    return _record_table(
+        conn, base, list(scope_params), OBJECT_RECORD_COLUMNS,
+        order_col, order_dir, search, limit, offset, default_order="objects",
+    )
+
+
+def path_record_counts(
+    conn: duckdb.DuckDBPyConnection,
+    path: str,
+    *,
+    search: str = "",
+    order_col: str = "element_count",
+    order_dir: str = "desc",
+    limit: int = 25,
+    offset: int = 0,
+) -> tuple[int, int, list[dict[str, Any]]]:
+    """Per-record element count of a scalar array field (one row per record).
+
+    ``element_count`` is how many non-null elements the record has at ``path``
+    (e.g. number of ``content_type[]`` values); sort desc to find the record with
+    the most. Returns ``(total, filtered, rows)`` for server-side pagination.
+    """
+    base = """
+        select d.timdex_record_id, d.source, d.run_id, d.run_record_offset,
+               count(*) filter (where e.value is not null) as element_count
+        from eav e join docs d using (timdex_composite_id)
+        where e.path = ?
+        group by d.timdex_record_id, d.source, d.run_id, d.run_record_offset
+    """
+    return _record_table(
+        conn, base, [path], PATH_RECORD_COLUMNS,
+        order_col, order_dir, search, limit, offset, default_order="element_count",
+    )
+
+
+def _record_table(
+    conn: duckdb.DuckDBPyConnection,
+    base: str,
+    base_params: list,
+    columns: list[str],
+    order_col: str,
+    order_dir: str,
+    search: str,
+    limit: int,
+    offset: int,
+    *,
+    default_order: str,
+) -> tuple[int, int, list[dict[str, Any]]]:
+    """Shared paginate/search/order wrapper for the one-row-per-record tables.
+
+    ``base`` is a SELECT exposing the identity columns plus the metric columns;
+    search matches ``timdex_record_id``/``source``. ``order_col`` is whitelisted
+    against ``columns``.
+    """
+    total = conn.execute(
+        f"select count(*) from ({base})", base_params  # noqa: S608
+    ).fetchone()[0]
+    params = list(base_params)
+    search_sql = ""
+    if search:
+        search_sql = " where timdex_record_id ilike ? or source ilike ?"
+        params += [f"%{search}%", f"%{search}%"]
+    filtered = conn.execute(
+        f"select count(*) from ({base}){search_sql}", params  # noqa: S608
+    ).fetchone()[0]
+    if order_col not in columns:
+        order_col = default_order
+    direction = "desc" if order_dir == "desc" else "asc"
+    rows = conn.execute(
+        f"select * from ({base}){search_sql} "  # noqa: S608
+        # secondary sort by id keeps ties stable across pages
+        f"order by {order_col} {direction}, timdex_record_id limit ? offset ?",
+        [*params, limit, offset],
+    ).fetchall()
+    return (
+        total,
+        filtered,
+        [dict(zip(columns, r, strict=True)) for r in rows],
     )
 
 
