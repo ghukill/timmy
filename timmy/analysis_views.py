@@ -14,7 +14,6 @@ Routes:
 
 from __future__ import annotations
 
-import re
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -42,10 +41,6 @@ from timmy.main import (
 
 analysis_bp = Blueprint("analysis", __name__, url_prefix="/analysis")
 
-# analysis_id is also a filename stem, so constrain it before touching the
-# filesystem -- this is what makes path traversal via the URL impossible.
-ANALYSIS_ID_RE = re.compile(r"^\d{8}T\d{6}-[0-9a-f]{8}$")
-
 # Cap rows returned by the SQL console (one extra is fetched to detect overflow).
 MAX_QUERY_ROWS = 1000
 
@@ -59,7 +54,7 @@ def _analyses_dir() -> str:
 
 def _check_analysis_id(analysis_id: str) -> None:
     """404 unless the id matches our generated format (also blocks traversal)."""
-    if not ANALYSIS_ID_RE.match(analysis_id):
+    if not analysis.is_valid_analysis_id(analysis_id):
         abort(404)
 
 

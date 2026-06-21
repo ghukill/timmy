@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -149,10 +150,20 @@ create table manifest (
 """
 
 
+# The shape new_analysis_id() produces: <UTC stamp>-<8 hex>. Validating against
+# it also blocks path traversal, since the id doubles as the DB filename stem.
+ANALYSIS_ID_RE = re.compile(r"^\d{8}T\d{6}-[0-9a-f]{8}$")
+
+
 def new_analysis_id() -> str:
     """A human-sortable, collision-resistant id (also the DB filename stem)."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     return f"{stamp}-{uuid4().hex[:8]}"
+
+
+def is_valid_analysis_id(analysis_id: str) -> bool:
+    """True if ``analysis_id`` matches our generated format (also blocks traversal)."""
+    return bool(ANALYSIS_ID_RE.match(analysis_id))
 
 
 def analysis_path(analyses_dir: str | os.PathLike[str], analysis_id: str) -> Path:

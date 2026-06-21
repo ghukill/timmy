@@ -14,6 +14,7 @@ from timmy.analysis.flatten import (
     make_timdex_composite_id,
 )
 from timmy.analysis.store import (
+    ANALYSIS_ID_RE,
     OBJECT_IDENTITY_COLUMNS,
     OBJECT_RECORD_COLUMNS,
     PATH_RECORD_COLUMNS,
@@ -22,6 +23,7 @@ from timmy.analysis.store import (
     build_analysis,
     delete_analysis,
     field_usage,
+    is_valid_analysis_id,
     list_analyses,
     new_analysis_id,
     object_columns,
@@ -40,6 +42,7 @@ from timmy.analysis.store import (
 )
 
 __all__ = [
+    "ANALYSIS_ID_RE",
     "OBJECT_IDENTITY_COLUMNS",
     "OBJECT_RECORD_COLUMNS",
     "PATH_RECORD_COLUMNS",
@@ -52,6 +55,7 @@ __all__ = [
     "field_usage",
     "flatten",
     "flatten_record",
+    "is_valid_analysis_id",
     "list_analyses",
     "make_timdex_composite_id",
     "new_analysis_id",

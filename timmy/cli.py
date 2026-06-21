@@ -22,6 +22,10 @@ from timmy.config import (
     load_config,
     resolve_config,
 )
+from timmy.output import emit_csv, emit_json, emit_record, emit_rows
+
+# Cap rows pulled by `analysis query`; one extra is fetched to detect overflow.
+MAX_QUERY_ROWS = 1000
 
 
 def _overrides(**kwargs: Any) -> dict[str, Any]:
@@ -171,6 +175,227 @@ def webapp_run(ctx: click.Context, host: str, port: int, debug: bool) -> None:
     except RuntimeError as exc:
         raise click.ClickException(str(exc)) from exc
     app.run(host=host, port=port, debug=debug)
+
+
+# --------------------------------------------------------------------------- #
+# analysis (agent read surface)
+# --------------------------------------------------------------------------- #
+json_option = click.option("--json", "as_json", is_flag=True, help="Emit JSON for agents.")
+
+
+def _analyses_dir(ctx: click.Context) -> str:
+    return load_config(ctx.obj["overrides"])["analysis_dir"]
+
+
+def _open(ctx: click.Context, analysis_id: str):
+    """Open an analysis DB read-only, mapping bad-id/missing into clean CLI errors."""
+    from timmy.analysis import is_valid_analysis_id, open_analysis
+
+    if not is_valid_analysis_id(analysis_id):
+        raise click.ClickException(f"Not a valid analysis id: {analysis_id!r}")
+    try:
+        return open_analysis(_analyses_dir(ctx), analysis_id)
+    except FileNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _manifest_matches_source(manifest: dict[str, Any], source: str) -> bool:
+    """True if an analysis was built for ``source`` (per filters_json, then label)."""
+    raw = manifest.get("filters_json")
+    if raw:
+        try:
+            src = json.loads(raw).get("source")
+        except (json.JSONDecodeError, AttributeError):
+            src = None
+        if isinstance(src, list) and source in src:
+            return True
+        if isinstance(src, str) and source == src:
+            return True
+    return source.lower() in (manifest.get("label") or "").lower()
+
+
+@cli.group()
+def analysis() -> None:
+    """Inspect built analyses (read-only; agent-facing)."""
+
+
+@analysis.command("list")
+@click.option("--source", default=None, help="Only analyses built for this source.")
+@json_option
+@click.pass_context
+def analysis_list(ctx: click.Context, source: str | None, as_json: bool) -> None:
+    """List built analyses, newest first."""
+    from timmy.analysis import list_analyses
+
+    manifests = list_analyses(_analyses_dir(ctx))
+    if source:
+        manifests = [m for m in manifests if _manifest_matches_source(m, source)]
+    emit_rows(
+        manifests,
+        as_json=as_json,
+        columns=["analysis_id", "created_at", "label", "doc_count", "eav_count", "name"],
+    )
+
+
+@analysis.command("show")
+@click.argument("analysis_id")
+@json_option
+@click.pass_context
+def analysis_show(ctx: click.Context, analysis_id: str, as_json: bool) -> None:
+    """Show one analysis manifest."""
+    from timmy.analysis import is_valid_analysis_id, read_manifest
+
+    if not is_valid_analysis_id(analysis_id):
+        raise click.ClickException(f"Not a valid analysis id: {analysis_id!r}")
+    try:
+        manifest = read_manifest(_analyses_dir(ctx), analysis_id)
+    except FileNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+    emit_record(manifest, as_json=as_json)
+
+
+@analysis.command("fields")
+@click.argument("analysis_id")
+@click.option("--field", default=None, help="Restrict to a single top-level field.")
+@json_option
+@click.pass_context
+def analysis_fields(
+    ctx: click.Context, analysis_id: str, field: str | None, as_json: bool
+) -> None:
+    """Per-field coverage: type, coverage_pct, cardinality, distinct values."""
+    from timmy.analysis import top_level_fields
+
+    conn = _open(ctx, analysis_id)
+    try:
+        rows = top_level_fields(conn)
+    finally:
+        conn.close()
+    if field:
+        rows = [r for r in rows if r["field"] == field]
+        if not rows:
+            raise click.ClickException(f"No field {field!r} in analysis {analysis_id}.")
+    emit_rows(
+        rows,
+        as_json=as_json,
+        columns=[
+            "field", "type", "coverage_pct", "doc_count", "distinct_values",
+            "count_min", "count_avg", "count_max", "sample_value",
+        ],
+    )
+
+
+@analysis.command("values")
+@click.argument("analysis_id")
+@click.option("--path", required=True, help="Field/path prefix to read values under.")
+@click.option("--search", default="", help="Filter values containing this text.")
+@click.option("--limit", default=100, show_default=True, type=int)
+@click.option("--offset", default=0, show_default=True, type=int)
+@json_option
+@click.pass_context
+def analysis_values(
+    ctx: click.Context,
+    analysis_id: str,
+    path: str,
+    search: str,
+    limit: int,
+    offset: int,
+    as_json: bool,
+) -> None:
+    """Distinct values (with counts) under a path."""
+    from timmy.analysis import path_values
+
+    conn = _open(ctx, analysis_id)
+    try:
+        total, filtered, rows = path_values(
+            conn, path, search=search, limit=limit, offset=offset
+        )
+    finally:
+        conn.close()
+    click.echo(f"{len(rows)} of {filtered} value(s) (path total {total})", err=True)
+    emit_rows(
+        rows,
+        as_json=as_json,
+        columns=["path", "value", "documents", "occurrences", "pct_of_path"],
+    )
+
+
+@analysis.command("records")
+@click.argument("analysis_id")
+@click.option("--path", required=True, help="Path the value lives at.")
+@click.option("--value", required=True, help="Value to find records for.")
+@click.option("--search", default="", help="Filter records by id/source text.")
+@click.option("--limit", default=100, show_default=True, type=int)
+@click.option("--offset", default=0, show_default=True, type=int)
+@json_option
+@click.pass_context
+def analysis_records(
+    ctx: click.Context,
+    analysis_id: str,
+    path: str,
+    value: str,
+    search: str,
+    limit: int,
+    offset: int,
+    as_json: bool,
+) -> None:
+    """Records carrying a given value at a given path."""
+    from timmy.analysis import value_records
+
+    conn = _open(ctx, analysis_id)
+    try:
+        total, filtered, rows = value_records(
+            conn, path, value, search=search, limit=limit, offset=offset
+        )
+    finally:
+        conn.close()
+    click.echo(f"{len(rows)} of {filtered} record(s) (total {total})", err=True)
+    emit_rows(
+        rows,
+        as_json=as_json,
+        columns=["timdex_record_id", "source", "run_id", "run_record_offset"],
+    )
+
+
+@analysis.command("query")
+@click.argument("analysis_id")
+@click.argument("sql")
+@click.option("--csv", "as_csv", is_flag=True, help="Emit CSV instead of a table.")
+@json_option
+@click.pass_context
+def analysis_query(
+    ctx: click.Context, analysis_id: str, sql: str, as_csv: bool, as_json: bool
+) -> None:
+    """Run read-only SQL against an analysis DB (docs/eav/manifest schema).
+
+    The connection is read-only, so the engine itself rejects any write -- the
+    universal escape hatch for anything the typed commands don't cover.
+    """
+    if as_csv and as_json:
+        raise click.ClickException("Choose either --csv or --json, not both.")
+
+    conn = _open(ctx, analysis_id)
+    try:
+        cursor = conn.execute(sql)
+        columns = [d[0] for d in cursor.description] if cursor.description else []
+        fetched = cursor.fetchmany(MAX_QUERY_ROWS + 1)
+    except Exception as exc:  # noqa: BLE001 -- report SQL errors as a clean CLI failure
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+
+    truncated = len(fetched) > MAX_QUERY_ROWS
+    rows = fetched[:MAX_QUERY_ROWS]
+    if truncated:
+        click.echo(f"(truncated to {MAX_QUERY_ROWS} rows)", err=True)
+
+    if as_csv:
+        emit_csv(columns, [list(r) for r in rows])
+        return
+    dict_rows = [dict(zip(columns, r, strict=True)) for r in rows]
+    if as_json:
+        emit_json(dict_rows)
+        return
+    emit_rows(dict_rows, as_json=False, columns=columns)
 
 
 if __name__ == "__main__":
