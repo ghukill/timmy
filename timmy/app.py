@@ -8,6 +8,7 @@ from flask import Flask
 from timmy.analysis_views import analysis_bp
 from timmy.dataset import load_dataset
 from timmy.main import main
+from timmy.runs_views import runs_bp
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -72,6 +73,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
     app.logger.info("Dataset loaded from %s", app.extensions["td"].location)
 
     app.register_blueprint(main)
+    app.register_blueprint(runs_bp)
     app.register_blueprint(analysis_bp)
 
     register_shell_context(app)

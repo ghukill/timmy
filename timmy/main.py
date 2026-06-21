@@ -78,8 +78,11 @@ VERSION_COLUMNS = [
 VERSION_DISPLAY_COLUMNS = [c for c in VERSION_COLUMNS if c != "source"]
 
 # The metadata view we browse. current_records is one current row per
-# (source, timdex_record_id); swap for metadata.records to see all versions.
+# (source, timdex_record_id); metadata.records holds every version. The
+# `f_all_versions` filter swaps between them (see _records_table) -- the runs
+# wing turns it on so a run's browse corpus matches its (history-based) count.
 RECORDS_TABLE = "metadata.current_records"
+ALL_VERSIONS_TABLE = "metadata.records"
 
 # Cap on rows returned per request, regardless of what the client asks for.
 MAX_PAGE_LENGTH = 200
@@ -103,6 +106,21 @@ def records() -> str:
 def _split_csv(value: str) -> list[str]:
     """Split a comma-separated filter value into a clean list of terms."""
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _all_versions(args) -> bool:
+    """Whether to browse every version (metadata.records) vs. current only.
+
+    Shared by the browse view and the analysis build so a single flag bounds both
+    the on-screen corpus and what TDA reads for an analysis -- the runs wing sets
+    it so a run's records match its history-based count.
+    """
+    return bool(args.get("f_all_versions", default="", type=str).strip())
+
+
+def _records_table(args) -> str:
+    """Resolve which metadata table to browse from the request args."""
+    return ALL_VERSIONS_TABLE if _all_versions(args) else RECORDS_TABLE
 
 
 def _record_limit(args) -> int | None:
@@ -179,6 +197,9 @@ def records_data():
     order_dir = "desc" if request.args.get("order[0][dir]") == "desc" else "asc"
 
     where_sql, params = _build_where(request.args)
+    # current_records (default) or metadata.records (all versions); the latter is
+    # how a run's browse corpus matches its history-based count.
+    records_table = _records_table(request.args)
     # Optional cap on the matched corpus (maps to TDA's read `limit`). It bounds
     # the filtered count and the page slice so the browse mirrors exactly what an
     # analysis built from this filter would read.
@@ -191,10 +212,10 @@ def records_data():
     try:
         with dataset_lock:
             records_total = conn.execute(
-                f"select count(*) from {RECORDS_TABLE}"  # noqa: S608
+                f"select count(*) from {records_table}"  # noqa: S608
             ).fetchone()[0]
             records_filtered = conn.execute(
-                f"select count(*) from {RECORDS_TABLE}{where_sql}",  # noqa: S608
+                f"select count(*) from {records_table}{where_sql}",  # noqa: S608
                 params,
             ).fetchone()[0]
             if record_limit is not None:
@@ -207,7 +228,7 @@ def records_data():
                 rows = []
             else:
                 page_query = (
-                    f"select {columns_sql} from {RECORDS_TABLE}{where_sql} "  # noqa: S608
+                    f"select {columns_sql} from {records_table}{where_sql} "  # noqa: S608
                     f"order by {order_col} {order_dir} "
                     f"limit ? offset ?"
                 )

@@ -46,6 +46,11 @@
       .filters label.wide {
         grid-column: 1 / -1;
       }
+      .filters label.checkbox {
+        flex-direction: row;
+        align-items: center;
+        gap: 0.5rem;
+      }
       .filters input {
         padding: 0.35rem 0.5rem;
         font-family: ui-monospace, monospace;
@@ -85,36 +90,50 @@
       action filter to surface deleted/errored records.
     </p>
 
-    <details class="filters">
+    {# Open the panel when arriving with a carried-over filter (e.g. from /runs)
+       so the active filter is visible, not hidden behind a collapsed summary. #}
+    <details class="filters" {{ 'open' if request.args.get('f_run_id') or request.args.get('f_source') or request.args.get('f_run_type') or request.args.get('f_run_date') or request.args.get('f_all_versions') }}>
       <summary>Filters</summary>
       <div class="grid">
         <label>
           source <span class="warn">comma-separated</span>
-          <input id="f_source" placeholder="alma, dspace" />
+          <input id="f_source" value="{{ request.args.get('f_source', '') }}" placeholder="alma, dspace" />
         </label>
         <label>
           run_date <span class="warn">YYYY-MM-DD</span>
-          <input id="f_run_date" placeholder="2025-01-01" />
+          <input id="f_run_date" value="{{ request.args.get('f_run_date', '') }}" placeholder="2025-01-01" />
         </label>
         <label>
           run_type <span class="warn">comma-separated</span>
-          <input id="f_run_type" placeholder="daily, full" />
+          <input id="f_run_type" value="{{ request.args.get('f_run_type', '') }}" placeholder="daily, full" />
         </label>
         <label>
           action <span class="warn">comma-separated</span>
-          <input id="f_action" value="index" placeholder="index, delete" />
+          {# Defaults to index on a clean visit, but an explicit ?f_action= (even
+             empty, as the runs hand-off sends) wins so every action shows. #}
+          <input id="f_action" value="{{ request.args.get('f_action', 'index') }}" placeholder="index, delete" />
         </label>
         <label>
           run_id <span class="warn">comma-separated</span>
-          <input id="f_run_id" />
+          <input id="f_run_id" value="{{ request.args.get('f_run_id', '') }}" />
         </label>
         <label>
           limit <span class="warn">max records (maps to TDA read limit)</span>
-          <input id="f_limit" type="number" min="1" step="1" placeholder="e.g. 1000" />
+          <input id="f_limit" type="number" min="1" step="1" value="{{ request.args.get('f_limit', '') }}" placeholder="e.g. 1000" />
+        </label>
+        <label class="checkbox">
+          <span
+            >all versions
+            <span class="warn"
+              >browse <code>metadata.records</code> (every version), not just
+              current</span
+            ></span
+          >
+          <input id="f_all_versions" type="checkbox" {{ 'checked' if request.args.get('f_all_versions') }} />
         </label>
         <label class="wide">
           where <span class="warn">raw SQL predicate &mdash; unsafe, advanced use only</span>
-          <textarea id="f_where"></textarea>
+          <textarea id="f_where">{{ request.args.get('f_where', '') }}</textarea>
         </label>
       </div>
       <div class="actions">
@@ -184,6 +203,9 @@
               d[id] = document.getElementById(id).value.trim();
             });
             d.f_where = whereEditor.getValue().trim();
+            d.f_all_versions = document.getElementById("f_all_versions").checked
+              ? "1"
+              : "";
           },
         },
         // Single ordering column keeps the server-side SQL simple.
@@ -219,6 +241,7 @@
       });
       document.getElementById("clear").addEventListener("click", () => {
         FILTER_IDS.forEach((id) => (document.getElementById(id).value = ""));
+        document.getElementById("f_all_versions").checked = false;
         whereEditor.setValue("");
         table.ajax.reload();
       });
@@ -244,6 +267,10 @@
           add(id, document.getElementById(id).value.trim()),
         );
         add("f_where", whereEditor.getValue().trim());
+        add(
+          "f_all_versions",
+          document.getElementById("f_all_versions").checked ? "1" : "",
+        );
         add("search[value]", table.search());
         add("name", document.getElementById("analysis_name").value.trim());
         add("notes", document.getElementById("analysis_notes").value.trim());

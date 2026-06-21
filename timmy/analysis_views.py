@@ -35,6 +35,7 @@ from timmy.dataset import dataset_lock, get_app_dataset
 from timmy.main import (
     IN_FILTER_COLUMNS,
     SEARCHABLE_COLUMNS,
+    _all_versions,
     _record_limit,
     _split_csv,
 )
@@ -157,6 +158,9 @@ def build():
     """
     where, filters = _tda_filter_from_request(request.values)
     limit = _record_limit(request.values)
+    # Match the browse: an analysis built from an all-versions browse reads every
+    # version (metadata.records), not just current ones.
+    table = "records" if _all_versions(request.values) else "current_records"
     label = _label_from(where, filters, limit)
     name = request.values.get("name", default="", type=str).strip() or None
     notes = request.values.get("notes", default="", type=str).strip() or None
@@ -166,6 +170,7 @@ def build():
                 get_app_dataset(),
                 _analyses_dir(),
                 where=where,
+                table=table,
                 limit=limit,
                 label=label,
                 name=name,

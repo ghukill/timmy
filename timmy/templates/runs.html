@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Timmy &mdash; Runs</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.datatables.net/2.1.8/css/dataTables.dataTables.min.css"
+    />
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 2rem;
+      }
+      td {
+        font-family: ui-monospace, monospace;
+        font-size: 0.85rem;
+      }
+      td.num,
+      th.num {
+        text-align: right;
+      }
+      details.filters {
+        border: 1px solid #ccc;
+        border-radius: 6px;
+        padding: 0.5rem 1rem 1rem;
+        margin-bottom: 1.5rem;
+      }
+      details.filters summary {
+        cursor: pointer;
+        font-weight: 600;
+      }
+      .filters .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 0.75rem 1.5rem;
+        margin-top: 1rem;
+      }
+      .filters label {
+        display: flex;
+        flex-direction: column;
+        font-size: 0.85rem;
+        gap: 0.25rem;
+      }
+      .filters input {
+        padding: 0.35rem 0.5rem;
+        font-family: ui-monospace, monospace;
+      }
+      .filters .warn {
+        color: #a15c00;
+        font-size: 0.75rem;
+      }
+      .filters .actions {
+        margin-top: 1rem;
+        display: flex;
+        gap: 0.5rem;
+      }
+      .selection-bar {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+        margin-bottom: 1.5rem;
+      }
+      .selection-bar .count {
+        font-size: 0.85rem;
+        color: #555;
+      }
+      .run-id-cell {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+      }
+      .run-id-cell input {
+        flex: 0 0 auto;
+      }
+    </style>
+  </head>
+  <body>
+    {% include "_nav.html" %}
+    <h1>Runs</h1>
+    <p>
+      Operational view of every ETL run, aggregated straight from
+      <code>metadata.records</code> (no payload reads). One row per
+      <code>run_id</code> &mdash; its record count and action breakdown. Paging,
+      search, and sorting run server-side in DuckDB.
+    </p>
+
+    <details class="filters">
+      <summary>Filters</summary>
+      <div class="grid">
+        <label>
+          source <span class="warn">comma-separated</span>
+          <input id="f_source" placeholder="alma, dspace" />
+        </label>
+        <label>
+          run_type <span class="warn">comma-separated</span>
+          <input id="f_run_type" placeholder="daily, full" />
+        </label>
+        <label>
+          run_date <span class="warn">YYYY-MM-DD</span>
+          <input id="f_run_date" placeholder="2025-01-01" />
+        </label>
+      </div>
+      <div class="actions">
+        <button type="button" id="apply">Apply filters</button>
+        <button type="button" id="clear">Clear</button>
+      </div>
+    </details>
+
+    <div class="selection-bar">
+      <button type="button" id="open-records" disabled>
+        Open selected in records
+      </button>
+      <button type="button" id="clear-selection" disabled>Clear selection</button>
+      <span class="count" id="selection-count">no runs selected</span>
+      <span class="warn"
+        >Tick runs to port them into <code>/records</code> as a single
+        <code>run_id IN (&hellip;)</code> corpus &mdash; browse them, then run a
+        metadata analysis.</span
+      >
+    </div>
+
+    <table id="runs" class="display" style="width: 100%">
+      <thead>
+        <tr>
+          <th>run_id</th>
+          <th>source</th>
+          <th>run_type</th>
+          <th>run_date</th>
+          <th>run_timestamp</th>
+          <th class="num">records</th>
+          <th class="num">index</th>
+          <th class="num">delete</th>
+          <th class="num">skip</th>
+          <th class="num">error</th>
+        </tr>
+      </thead>
+    </table>
+
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.datatables.net/2.1.8/js/dataTables.min.js"></script>
+    <script>
+      const FILTER_IDS = ["f_source", "f_run_type", "f_run_date"];
+
+      // Where the "open in records" hand-off lands; f_action is sent empty so
+      // every action in the selected runs shows (not just the index default).
+      const RECORDS_URL = "{{ url_for('main.records') }}";
+
+      // Build a /records URL pre-filtered to one or more run_ids. Browses all
+      // versions (metadata.records) so the corpus matches the run's record count
+      // -- current_records would drop records since superseded by a newer run.
+      function recordsUrlForRuns(runIds) {
+        const params = new URLSearchParams();
+        params.set("f_run_id", runIds.join(","));
+        params.set("f_action", "");
+        params.set("f_all_versions", "1");
+        return `${RECORDS_URL}?${params.toString()}`;
+      }
+
+      // Selection is tracked by run_id so it survives sort/search/paging redraws.
+      const selected = new Set();
+
+      function renderRunId(data, type) {
+        if (type !== "display") return data;
+        const wrap = document.createElement("span");
+        wrap.className = "run-id-cell";
+
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.className = "rsel";
+        cb.dataset.runId = data;
+        cb.checked = selected.has(data);
+
+        const a = document.createElement("a");
+        a.href = recordsUrlForRuns([data]);
+        a.textContent = data;
+
+        wrap.appendChild(cb);
+        wrap.appendChild(a);
+        return wrap.outerHTML;
+      }
+
+      const numCol = { className: "num" };
+      const table = new DataTable("#runs", {
+        serverSide: true,
+        processing: true,
+        ajax: {
+          url: "{{ url_for('runs.runs_data') }}",
+          data: function (d) {
+            FILTER_IDS.forEach((id) => {
+              d[id] = document.getElementById(id).value.trim();
+            });
+          },
+        },
+        orderMulti: false,
+        // Default sort: newest runs first.
+        order: [[4, "desc"]],
+        pageLength: 25,
+        lengthMenu: [10, 25, 50, 100],
+        columns: [
+          { data: "run_id", render: renderRunId },
+          { data: "source" },
+          { data: "run_type" },
+          { data: "run_date" },
+          { data: "run_timestamp" },
+          { data: "record_count", ...numCol },
+          { data: "index_count", ...numCol },
+          { data: "delete_count", ...numCol },
+          { data: "skip_count", ...numCol },
+          { data: "error_count", ...numCol },
+        ],
+      });
+
+      function refreshSelectionBar() {
+        const n = selected.size;
+        document.getElementById("selection-count").textContent =
+          n === 0 ? "no runs selected" : `${n} run${n === 1 ? "" : "s"} selected`;
+        document.getElementById("open-records").disabled = n === 0;
+        document.getElementById("clear-selection").disabled = n === 0;
+      }
+
+      // Reapply checkbox state after every DataTables redraw (sort/page/search).
+      table.on("draw", () => {
+        document.querySelectorAll("#runs .rsel").forEach((cb) => {
+          cb.checked = selected.has(cb.dataset.runId);
+        });
+      });
+
+      document.querySelector("#runs").addEventListener("change", (e) => {
+        const cb = e.target;
+        if (!cb.classList.contains("rsel")) return;
+        if (cb.checked) {
+          selected.add(cb.dataset.runId);
+        } else {
+          selected.delete(cb.dataset.runId);
+        }
+        refreshSelectionBar();
+      });
+
+      document.getElementById("open-records").addEventListener("click", () => {
+        if (selected.size === 0) return;
+        window.location.href = recordsUrlForRuns([...selected]);
+      });
+
+      document.getElementById("clear-selection").addEventListener("click", () => {
+        selected.clear();
+        document
+          .querySelectorAll("#runs .rsel")
+          .forEach((cb) => (cb.checked = false));
+        refreshSelectionBar();
+      });
+
+      document.getElementById("apply").addEventListener("click", () => {
+        table.ajax.reload();
+      });
+      document.getElementById("clear").addEventListener("click", () => {
+        FILTER_IDS.forEach((id) => (document.getElementById(id).value = ""));
+        table.ajax.reload();
+      });
+    </script>
+  </body>
+</html>
