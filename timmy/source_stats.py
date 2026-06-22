@@ -20,8 +20,11 @@ if TYPE_CHECKING:
     from duckdb import DuckDBPyConnection
 
 # Per-source overview row (the lightweight "what sources exist, how big" table).
-# record_count is the authoritative *current* count (one row per current record
-# in metadata.current_records); versions counts every historical row.
+# record_count is the authoritative *current* count: one row per current record
+# in metadata.current_records whose latest action is 'index'. Records whose
+# current state is a deletion (action = 'delete') are treated as not existing for
+# these naive counts -- inspecting them is a deliberate deep dive, not part of
+# "how big is this source". versions counts every historical row.
 SOURCE_OVERVIEW_COLUMNS = [
     "source",
     "record_count",
@@ -76,7 +79,8 @@ RUNS_CTE = """
 def source_overview(conn: DuckDBPyConnection) -> list[dict]:
     """Per-source metadata summary, one row per source (sorted by source).
 
-    ``record_count`` is the current count (``metadata.current_records``);
+    ``record_count`` is the current count of *indexed* records
+    (``metadata.current_records`` filtered to ``action = 'index'``);
     ``versions``/``runs``/``first_run``/``last_run`` come from the full history
     (``metadata.records``). A source with only superseded/deleted records still
     appears (with a ``record_count`` of 0).
@@ -84,7 +88,8 @@ def source_overview(conn: DuckDBPyConnection) -> list[dict]:
     current = {
         source: count
         for source, count in conn.execute(
-            "select source, count(*) from metadata.current_records group by source"
+            "select source, count(*) from metadata.current_records "
+            "where action = 'index' group by source"
         ).fetchall()
     }
     history = conn.execute(

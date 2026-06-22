@@ -103,8 +103,8 @@ documentation an agent needs to use it well. Install it as a **skill** for the
 agent of your choice:
 
 ```sh
-timmy docs install-skill --path ~/.agents/skills    # cross-agent location
-timmy docs install-skill                            # default: ~/.claude/skills
+timmy docs install-skill                          # default: ~/.agents/skills
+timmy docs install-skill --path /some/other/skills  # or any skills directory
 ```
 
 This writes a self-contained `timmy/` skill (a `SKILL.md` entry point plus

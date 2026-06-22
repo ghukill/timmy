@@ -781,7 +781,7 @@ def docs_schema(as_json: bool) -> None:
     "--path",
     "target_dir",
     default=None,
-    help="Skills directory to install into (default: ~/.claude/skills).",
+    help="Skills directory to install into (default: ~/.agents/skills).",
 )
 def docs_install_skill(target_dir: str | None) -> None:
     """Install the docs as a self-contained agent skill.
@@ -793,7 +793,7 @@ def docs_install_skill(target_dir: str | None) -> None:
 
     from timmy.docsgen import build_skill
 
-    target = Path(target_dir).expanduser() if target_dir else Path.home() / ".claude" / "skills"
+    target = Path(target_dir).expanduser() if target_dir else Path.home() / ".agents" / "skills"
     skill_dir = build_skill(target)
     click.echo(f"Installed timmy skill to {skill_dir}", err=True)
     click.echo(str(skill_dir))
