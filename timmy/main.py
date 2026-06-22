@@ -1,4 +1,7 @@
+import re
+
 from flask import Blueprint, abort, current_app, jsonify, render_template, request
+from markupsafe import Markup, escape
 
 from timmy.dataset import dataset_lock, get_app_dataset
 from timmy.filters import IN_FILTER_COLUMNS, SEARCHABLE_COLUMNS, split_csv
@@ -16,6 +19,37 @@ from timmy.sources import (
 )
 
 main = Blueprint("main", __name__)
+
+_ARRAY_INDEX_RE = re.compile(r"\[(\d+)\]")
+
+
+# Pastel palette for array-index digits; index value -> color (consistent across
+# fields). Kept in sync with the .idx-N classes in record.html.
+_INDEX_PALETTE_SIZE = 8
+
+
+@main.app_template_filter("colorize_indices")
+def colorize_indices(path_indexed: str) -> Markup:
+    """Render an indexed field path with each array index digit color-coded.
+
+    ``subjects[4].value[0]`` keeps its literal text but wraps the ``4`` and ``0``
+    in ``<span class="idx idx-N">`` so each array index gets a pastel color keyed
+    to its value (consistent across fields). Non-index text is HTML-escaped; a
+    path with no array indices renders unchanged.
+    """
+    parts: list[Markup] = []
+    last = 0
+    for match in _ARRAY_INDEX_RE.finditer(path_indexed or ""):
+        parts.append(escape(path_indexed[last : match.start()]))
+        idx = int(match.group(1))
+        parts.append(
+            Markup('[<span class="idx idx-{}">{}</span>]').format(
+                idx % _INDEX_PALETTE_SIZE, idx
+            )
+        )
+        last = match.end()
+    parts.append(escape(path_indexed[last:]))
+    return Markup("").join(parts)
 
 # Filter columns and the free-text search set are shared, Flask-free, with the
 # analysis build (see timmy.filters): IN_FILTER_COLUMNS, SEARCHABLE_COLUMNS.
