@@ -84,6 +84,10 @@ for that source), say so and offer to build it rather than guessing.
 For "why does record XYZ look like this?", drop to the record itself:
 `timmy record show <id>` returns its metadata, the transformed JSON, and the raw
 source payload. Comparing the source against the transformed output is how you
-reason about *why* a transformed field is blank or surprising. (Seeing the exact
-Transmogrifier mapping that produced it is a planned addition; for now, reason
-from source-vs-transformed.)
+reason about *why* a transformed field is blank or surprising.
+
+To go from inference to a definitive answer, read the transform code itself: the
+`transformed_record` was produced from the source by **Transmogrifier**, which
+Timmy can clone locally (`timmy transmog clone`). See `transmogrifier.md` for how
+records become TIMDEX records and how to find the exact `get_<field>` mapping for
+a source.

@@ -70,6 +70,7 @@ The CLI is grouped by area. The headline commands:
 | `timmy sources …` | Per-source metadata: record counts, ETL run history. Cheap, metadata-only — no analysis needed. |
 | `timmy analysis …` | Build and query **metadata analyses** (records flattened into a queryable DuckDB file) for field coverage, vocabulary, outliers, etc. |
 | `timmy record …` | Inspect a single record version: metadata plus its raw source and transformed payloads. |
+| `timmy transmog …` | Clone/manage a local checkout of [Transmogrifier](https://github.com/MITLibraries/transmogrifier) (the source→transformed engine) so the actual transform code is on hand to interrogate. |
 | `timmy docs …` | Read Timmy’s own documentation, or install it as an agent skill. |
 
 Every read command takes `--json` for machine-readable output (stdout is data,

@@ -33,6 +33,7 @@ NARRATIVE_TOPICS: dict[str, str] = {
     "overview": "Mental model: TIMDEX records, the EAV analysis model, find-or-build.",
     "playbooks": "Question -> command recipes for common agent tasks.",
     "sources": "Per-source notes: payload formats and known quirks.",
+    "transmogrifier": "How source -> transformed works; reading the cloned transform code.",
 }
 GENERATED_TOPICS: dict[str, str] = {
     "commands": "Full command reference (generated from the live CLI).",

@@ -33,6 +33,12 @@ PROJECT_CONFIG_NAME = "timmy.toml"
 # flag/env) still wins for a working copy.
 DEFAULT_ANALYSIS_DIR = str(USER_CONFIG_DIR / "analyses")
 
+# Timmy clones Transmogrifier (the source -> transformed engine) under the user's
+# home so an agent has the real transform code to interrogate. The URL is a
+# config field so a fork/branch can be pointed at instead of the canonical repo.
+DEFAULT_TRANSMOG_DIR = str(USER_CONFIG_DIR / "transmogrifier")
+DEFAULT_TRANSMOG_REPO_URL = "https://github.com/MITLibraries/transmogrifier"
+
 
 @dataclass(frozen=True)
 class Field:
@@ -49,6 +55,8 @@ class Field:
 FIELDS: tuple[Field, ...] = (
     Field("dataset_location", "TIMMY_TIMDEX_DATASET_LOCATION", "TIMDEX_DATASET_LOCATION", None),
     Field("analysis_dir", "TIMMY_TIMDEX_ANALYSIS_DIR", "TIMDEX_ANALYSIS_DIR", DEFAULT_ANALYSIS_DIR),
+    Field("transmog_dir", "TIMMY_TRANSMOG_DIR", "TRANSMOG_DIR", DEFAULT_TRANSMOG_DIR),
+    Field("transmog_repo_url", "TIMMY_TRANSMOG_REPO_URL", "TRANSMOG_REPO_URL", DEFAULT_TRANSMOG_REPO_URL),
     Field("log_level", "TIMMY_LOG_LEVEL", "LOG_LEVEL", "INFO"),
 )
 

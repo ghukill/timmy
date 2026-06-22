@@ -128,8 +128,18 @@ to see whether the data was present in the original at all:
   the relevant source snippet and the transformed field, and explain the
   mismatch as best the payloads support.
 
-You cannot yet see the exact Transmogrifier rule that ran (planned). Until then,
-reason from the source-vs-transformed evidence and say where you're inferring.
+To turn that inference into a definitive answer, read the transform code. The
+`transformed_record` is produced by Transmogrifier, which Timmy clones locally:
+
+```sh
+timmy transmog status   # cloned? else: timmy transmog clone
+timmy transmog path     # where the transform code lives
+```
+
+Then follow `transmogrifier.md`: `transmogrifier/config.py`'s `SOURCES` maps the
+record's `source` to its transform class, whose `get_<field>` method is the exact
+rule that did (or didn't) populate field Z. Cite the method and the source
+element it reads.
 
 ## Bespoke questions
 

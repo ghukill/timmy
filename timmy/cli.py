@@ -729,6 +729,99 @@ def sources_runs(
 
 
 # --------------------------------------------------------------------------- #
+# transmog (manage the local Transmogrifier checkout)
+# --------------------------------------------------------------------------- #
+@cli.group()
+def transmog() -> None:
+    """Clone/manage a local Transmogrifier checkout (the transform engine).
+
+    Transmogrifier turns a source record into the normalized TIMDEX
+    `transformed_record` -- how records enter the dataset. Timmy reads the
+    finished records but never runs the transform; cloning the real repo gives an
+    agent the actual transform code to interrogate (`timmy docs show
+    transmogrifier`). `clone` once, `update` to refresh, `path` to find the code.
+    """
+
+
+def _transmog_config(ctx: click.Context) -> tuple[str, str]:
+    """Resolve the (transmog_dir, transmog_repo_url) pair from layered config."""
+    cfg = load_config(ctx.obj["overrides"])
+    return cfg["transmog_dir"], cfg["transmog_repo_url"]
+
+
+@transmog.command("clone")
+@click.option("--force", is_flag=True, help="Re-clone over an existing checkout.")
+@json_option
+@click.pass_context
+def transmog_clone(ctx: click.Context, force: bool, as_json: bool) -> None:
+    """Clone Transmogrifier into the configured transmog dir."""
+    from timmy.transmog import TransmogError, clone_repo
+
+    transmog_dir, repo_url = _transmog_config(ctx)
+    click.echo(f"Cloning {repo_url} -> {transmog_dir}…", err=True)
+    try:
+        status = clone_repo(transmog_dir, repo_url, force=force)
+    except TransmogError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Cloned at commit {status['commit']} ({status['branch']}).", err=True
+    )
+    emit_record(status, as_json=as_json)
+
+
+@transmog.command("update")
+@json_option
+@click.pass_context
+def transmog_update(ctx: click.Context, as_json: bool) -> None:
+    """Fast-forward the existing checkout to its upstream."""
+    from timmy.transmog import TransmogError, update_repo
+
+    transmog_dir, repo_url = _transmog_config(ctx)
+    try:
+        status = update_repo(transmog_dir, repo_url)
+    except TransmogError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if status["updated"]:
+        click.echo(
+            f"Updated {status['previous_commit']} -> {status['commit']}.", err=True
+        )
+    else:
+        click.echo(f"Already up to date at {status['commit']}.", err=True)
+    emit_record(status, as_json=as_json)
+
+
+@transmog.command("status")
+@json_option
+@click.pass_context
+def transmog_status(ctx: click.Context, as_json: bool) -> None:
+    """Show whether Transmogrifier is cloned, and at which commit."""
+    from timmy.transmog import repo_status
+
+    transmog_dir, repo_url = _transmog_config(ctx)
+    status = repo_status(transmog_dir, repo_url)
+    if not status["cloned"]:
+        click.echo("Not cloned; run `timmy transmog clone`.", err=True)
+    emit_record(status, as_json=as_json)
+
+
+@transmog.command("path")
+@click.pass_context
+def transmog_path(ctx: click.Context) -> None:
+    """Print the path to the local Transmogrifier checkout.
+
+    Always prints the configured path (data, on stdout) so it's scriptable; if it
+    isn't cloned yet, a hint goes to stderr.
+    """
+    from timmy.transmog import repo_status
+
+    transmog_dir, repo_url = _transmog_config(ctx)
+    status = repo_status(transmog_dir, repo_url)
+    if not status["cloned"]:
+        click.echo("(not cloned yet; run `timmy transmog clone`)", err=True)
+    click.echo(status["path"])
+
+
+# --------------------------------------------------------------------------- #
 # docs (human/agent documentation surface)
 # --------------------------------------------------------------------------- #
 @cli.group()
