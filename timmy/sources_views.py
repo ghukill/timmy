@@ -1,18 +1,22 @@
-"""Web layer for the runs wing (the ``/runs`` blueprint).
+"""Web layer for the sources wing (the ``/sources`` blueprint).
 
 The operational/provenance view that complements the metadata-profiling wings.
-A *run* is one ETL run (identified by ``run_id``); ``run_id`` uniquely determines
-its source/run_type/run_date/run_timestamp, so a run is just an aggregate over
-``metadata.records`` -- counts and an action breakdown, no payload reads.
+It has two parts, both served straight from the dataset's ``metadata`` tables
+(no payload reads, no materialized artifact):
 
-This is deliberately TDA-only: there is no materialized artifact like the
-``/analysis`` corpus. Everything is served from the shared dataset connection,
-the same metadata-first path as ``/records``.
+- a **static per-source overview** (current record count, history, run count,
+  first/last run) rendered once on page load -- the "what sources exist, how
+  big" answer; and
+- the **dynamic runs table** (DataTables, server-side): one row per ETL
+  ``run_id`` with its record count and action breakdown.
+
+The aggregate SQL lives in :mod:`timmy.source_stats` (Flask-free) so the CLI
+``sources`` commands compute exactly the same numbers.
 
 Routes:
 
-- ``GET /runs``        the runs table (DataTables server-side)
-- ``GET /runs/data``   DataTables server-side endpoint, one row per run
+- ``GET /sources``          overview table + the runs table shell
+- ``GET /sources/runs/data``  DataTables server-side endpoint, one row per run
 
 Each run links into ``/records`` pre-filtered to its ``run_id``; multi-select
 ports several runs over as a single ``run_id IN (...)`` corpus.
@@ -24,60 +28,31 @@ from flask import Blueprint, jsonify, render_template, request
 
 from timmy.dataset import dataset_lock, get_app_dataset
 from timmy.filters import split_csv
+from timmy.source_stats import (
+    RUN_COLUMNS,
+    RUNS_CTE,
+    SEARCHABLE_RUN_COLUMNS,
+    SOURCE_OVERVIEW_COLUMNS,
+    source_overview,
+)
 
-runs_bp = Blueprint("runs", __name__, url_prefix="/runs")
-
-# Columns surfaced in the runs table, in display order. Doubles as the order-by
-# whitelist (the DataTables order index maps into this list), so the column name
-# is never user-controlled SQL.
-RUN_COLUMNS = [
-    "run_id",
-    "source",
-    "run_type",
-    "run_date",
-    "run_timestamp",
-    "record_count",
-    "index_count",
-    "delete_count",
-    "skip_count",
-    "error_count",
-]
-
-# Columns the global search box applies to (cast to varchar so ILIKE is
-# type-agnostic). Only the descriptive run identity columns -- searching the
-# numeric count columns would be noise.
-SEARCHABLE_COLUMNS = ["run_id", "source", "run_type"]
-
-# One row per run. run_id determines source/run_type/run_date/run_timestamp, so
-# any_value() picks the (single) value per group cheaply. The action breakdown is
-# a set of conditional counts over the run's records. Selected once as a CTE that
-# the count/page queries then filter and page over.
-RUNS_CTE = """
-    runs as (
-        select
-            run_id,
-            any_value(source) as source,
-            any_value(run_type) as run_type,
-            cast(any_value(run_date) as date)::varchar as run_date,
-            cast(max(run_timestamp) as timestamp)::varchar as run_timestamp,
-            count(*) as record_count,
-            count(*) filter (where action = 'index') as index_count,
-            count(*) filter (where action = 'delete') as delete_count,
-            count(*) filter (where action = 'skip') as skip_count,
-            count(*) filter (where action = 'error') as error_count
-        from metadata.records
-        group by run_id
-    )
-"""
+sources_bp = Blueprint("sources", __name__, url_prefix="/sources")
 
 # Cap on rows returned per request, regardless of what the client asks for.
 MAX_PAGE_LENGTH = 200
 
 
-@runs_bp.get("/")
+@sources_bp.get("/")
 def index() -> str:
-    """Render the runs table page (DataTables in server-side mode)."""
-    return render_template("runs.html", columns=RUN_COLUMNS)
+    """Render the sources page: static overview table + the runs table shell."""
+    with dataset_lock:
+        overview = source_overview(get_app_dataset().conn)
+    return render_template(
+        "sources.html",
+        overview=overview,
+        overview_columns=SOURCE_OVERVIEW_COLUMNS,
+        columns=RUN_COLUMNS,
+    )
 
 
 def _build_where(args) -> tuple[str, list]:
@@ -93,9 +68,9 @@ def _build_where(args) -> tuple[str, list]:
 
     search_value = args.get("search[value]", default="", type=str).strip()
     if search_value:
-        ors = [f"cast({col} as varchar) ilike ?" for col in SEARCHABLE_COLUMNS]
+        ors = [f"cast({col} as varchar) ilike ?" for col in SEARCHABLE_RUN_COLUMNS]
         clauses.append("(" + " or ".join(ors) + ")")
-        params.extend([f"%{search_value}%"] * len(SEARCHABLE_COLUMNS))
+        params.extend([f"%{search_value}%"] * len(SEARCHABLE_RUN_COLUMNS))
 
     for column in ("source", "run_type"):
         values = split_csv(args.get(f"f_{column}", default="", type=str))
@@ -113,7 +88,7 @@ def _build_where(args) -> tuple[str, list]:
     return where_sql, params
 
 
-@runs_bp.get("/data")
+@sources_bp.get("/runs/data")
 def runs_data():
     """DataTables server-side endpoint: one aggregated row per run.
 

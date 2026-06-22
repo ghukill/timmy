@@ -9,7 +9,7 @@ from timmy.analysis_views import analysis_bp
 from timmy.config import default_flask_config, load_config, to_flask_config
 from timmy.dataset import load_dataset
 from timmy.main import main
-from timmy.runs_views import runs_bp
+from timmy.sources_views import sources_bp
 
 
 # Base layer applied before either resolved config or test_config, so the app
@@ -83,7 +83,7 @@ def create_app(
     app.logger.info("Dataset loaded from %s", app.extensions["td"].location)
 
     app.register_blueprint(main)
-    app.register_blueprint(runs_bp)
+    app.register_blueprint(sources_bp)
     app.register_blueprint(analysis_bp)
 
     register_shell_context(app)

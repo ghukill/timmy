@@ -640,5 +640,268 @@ def analysis_prune(
     emit_rows(to_prune, as_json=as_json, columns=columns)
 
 
+# --------------------------------------------------------------------------- #
+# sources (cheap, metadata-only source/run aggregates)
+# --------------------------------------------------------------------------- #
+@cli.group()
+def sources() -> None:
+    """Per-source metadata: counts and ETL runs (no analysis needed).
+
+    Everything here is a plain aggregate over the dataset's metadata tables --
+    milliseconds, no payload reads, no `analysis build`. Start here to learn what
+    sources exist and how big they are before deciding whether to build an EAV
+    analysis for field-content questions.
+    """
+
+
+@sources.command("list")
+@json_option
+@click.pass_context
+def sources_list(ctx: click.Context, as_json: bool) -> None:
+    """Per-source overview: current record count, history, runs, dates."""
+    from timmy.source_stats import SOURCE_OVERVIEW_COLUMNS, source_overview
+
+    td = _load_dataset(ctx)
+    emit_rows(source_overview(td.conn), as_json=as_json, columns=SOURCE_OVERVIEW_COLUMNS)
+
+
+@sources.command("show")
+@click.argument("source")
+@click.option("--limit", default=None, type=int, help="Cap how many runs are listed.")
+@json_option
+@click.pass_context
+def sources_show(
+    ctx: click.Context, source: str, limit: int | None, as_json: bool
+) -> None:
+    """Show one source's summary plus its ETL runs (newest first)."""
+    from timmy.source_stats import (
+        RUN_COLUMNS,
+        SOURCE_OVERVIEW_COLUMNS,
+        run_summaries,
+        source_overview,
+    )
+
+    td = _load_dataset(ctx)
+    summary = next((r for r in source_overview(td.conn) if r["source"] == source), None)
+    if summary is None:
+        raise click.ClickException(f"No source {source!r} in the dataset.")
+    runs = run_summaries(td.conn, sources=[source], limit=limit)
+
+    if as_json:
+        emit_json({"summary": summary, "runs": runs})
+        return
+    emit_record({c: summary[c] for c in SOURCE_OVERVIEW_COLUMNS}, as_json=False)
+    click.echo(f"\n--- ETL runs ({len(runs)}) ---", err=True)
+    emit_rows(runs, as_json=False, columns=RUN_COLUMNS)
+
+
+@sources.command("runs")
+@click.option("--source", "src", multiple=True, help="Filter to source(s) (repeatable/CSV).")
+@click.option("--limit", default=None, type=int, help="Cap how many runs are listed.")
+@json_option
+@click.pass_context
+def sources_runs(
+    ctx: click.Context, src: tuple[str, ...], limit: int | None, as_json: bool
+) -> None:
+    """List ETL runs (newest first), optionally filtered by source."""
+    from timmy.source_stats import RUN_COLUMNS, run_summaries
+
+    td = _load_dataset(ctx)
+    filter_sources = _flatten_csv(src) or None
+    runs = run_summaries(td.conn, sources=filter_sources, limit=limit)
+    emit_rows(runs, as_json=as_json, columns=RUN_COLUMNS)
+
+
+# --------------------------------------------------------------------------- #
+# docs (human/agent documentation surface)
+# --------------------------------------------------------------------------- #
+@cli.group()
+def docs() -> None:
+    """Read Timmy's docs, or install them as an agent skill.
+
+    Narrative topics ship as markdown; `commands` and `schema` are generated
+    from the live code, so they never drift. `install-skill` snapshots all of it
+    into an agent skill directory.
+    """
+
+
+@docs.command("list")
+@json_option
+def docs_list(as_json: bool) -> None:
+    """List available doc topics."""
+    from timmy.docsgen import list_topics
+
+    rows = [{"topic": name, "description": desc} for name, desc in list_topics()]
+    emit_rows(rows, as_json=as_json, columns=["topic", "description"])
+
+
+@docs.command("show")
+@click.argument("topic")
+@click.pass_context
+def docs_show(ctx: click.Context, topic: str) -> None:
+    """Print one doc topic as markdown (see `docs list` for names)."""
+    from timmy.docsgen import get_topic
+
+    try:
+        click.echo(get_topic(topic))
+    except KeyError:
+        raise click.ClickException(
+            f"No doc topic {topic!r}. Run `timmy docs list`."
+        ) from None
+
+
+@docs.command("catalog")
+@json_option
+def docs_catalog(as_json: bool) -> None:
+    """The command reference, generated from the live CLI."""
+    from timmy.docsgen import command_catalog, render_catalog_markdown
+
+    catalog = command_catalog()
+    if as_json:
+        emit_json(catalog)
+        return
+    click.echo(render_catalog_markdown(catalog))
+
+
+@docs.command("schema")
+@json_option
+def docs_schema(as_json: bool) -> None:
+    """The analysis-DB schema (docs/eav/manifest), generated from the code."""
+    from timmy.analysis.store import EXCLUDED_FIELDS, SCHEMA_SQL
+    from timmy.docsgen import render_schema_markdown
+
+    if as_json:
+        emit_json({"schema_sql": SCHEMA_SQL.strip(), "excluded_fields": sorted(EXCLUDED_FIELDS)})
+        return
+    click.echo(render_schema_markdown())
+
+
+@docs.command("install-skill")
+@click.option(
+    "--path",
+    "target_dir",
+    default=None,
+    help="Skills directory to install into (default: ~/.claude/skills).",
+)
+def docs_install_skill(target_dir: str | None) -> None:
+    """Install the docs as a self-contained agent skill.
+
+    Writes a `timmy/` skill (SKILL.md + reference/) into the skills directory,
+    snapshotting the generated topics and stamping the source version/commit.
+    """
+    from pathlib import Path
+
+    from timmy.docsgen import build_skill
+
+    target = Path(target_dir).expanduser() if target_dir else Path.home() / ".claude" / "skills"
+    skill_dir = build_skill(target)
+    click.echo(f"Installed timmy skill to {skill_dir}", err=True)
+    click.echo(str(skill_dir))
+
+
+# --------------------------------------------------------------------------- #
+# record (single-record inspection)
+# --------------------------------------------------------------------------- #
+@cli.group()
+def record() -> None:
+    """Inspect individual record versions, including raw payloads."""
+
+
+def _decode_payload(payload: Any) -> str | None:
+    """Decode a TDA payload (bytes/str/None) to text, tolerating None."""
+    if payload is None:
+        return None
+    if isinstance(payload, bytes):
+        return payload.decode("utf-8", errors="replace")
+    return payload
+
+
+@record.command("show")
+@click.argument("timdex_record_id")
+@click.option("--run-id", default=None, help="Pin a specific version's run_id (with --run-record-offset).")
+@click.option("--run-record-offset", default=None, type=int, help="Pin a specific version's offset (with --run-id).")
+@click.option("--source-only", is_flag=True, help="Emit only the source_record payload.")
+@click.option("--transformed-only", is_flag=True, help="Emit only the transformed_record payload.")
+@json_option
+@click.pass_context
+def record_show(
+    ctx: click.Context,
+    timdex_record_id: str,
+    run_id: str | None,
+    run_record_offset: int | None,
+    source_only: bool,
+    transformed_only: bool,
+    as_json: bool,
+) -> None:
+    """Show one record version: metadata + transformed + source payloads.
+
+    Defaults to the current version; pass --run-id and --run-record-offset
+    together to pin a specific historical version. The source payload is what an
+    agent reads to reason about *why* a transformed field looks the way it does.
+    """
+    from timmy.records import (
+        RECORD_METADATA_COLUMNS,
+        read_record_version,
+        resolve_current_key,
+    )
+    from timmy.sources import get_source_record_format, prettify
+
+    if source_only and transformed_only:
+        raise click.ClickException("Choose either --source-only or --transformed-only, not both.")
+    if (run_id is None) != (run_record_offset is None):
+        raise click.ClickException("Pass --run-id and --run-record-offset together, or neither.")
+
+    td = _load_dataset(ctx)
+    if run_id is None:
+        key = resolve_current_key(td, timdex_record_id)
+        if key is None:
+            raise click.ClickException(f"No current version for record {timdex_record_id!r}.")
+        run_id, run_record_offset = key
+    rec = read_record_version(td, timdex_record_id, run_id, run_record_offset)
+    if rec is None:
+        raise click.ClickException(f"No record version found for {timdex_record_id!r}.")
+
+    source_format = get_source_record_format(rec["source"])
+    source_text = _decode_payload(rec.get("source_record"))
+    transformed_text = _decode_payload(rec.get("transformed_record"))
+
+    if as_json:
+        payload: dict[str, Any] = {}
+        if not source_only:
+            # Parse transformed (always JSON) so agents get structured data, not a blob.
+            payload["transformed"] = json.loads(transformed_text) if transformed_text else None
+        if not transformed_only:
+            payload["source_record"] = source_text
+            payload["source_format"] = source_format
+        if not (source_only or transformed_only):
+            payload["metadata"] = {c: rec.get(c) for c in RECORD_METADATA_COLUMNS}
+        emit_json(payload)
+        return
+
+    if not (source_only or transformed_only):
+        emit_record({c: rec.get(c) for c in RECORD_METADATA_COLUMNS}, as_json=False)
+    if not source_only:
+        click.echo("\n--- transformed_record ---", err=True)
+        click.echo(prettify(transformed_text, "json"))
+    if not transformed_only:
+        click.echo(f"\n--- source_record ({source_format}) ---", err=True)
+        click.echo(prettify(source_text, source_format))
+
+
+@record.command("versions")
+@click.argument("timdex_record_id")
+@json_option
+@click.pass_context
+def record_versions(ctx: click.Context, timdex_record_id: str, as_json: bool) -> None:
+    """List every version of a record across all runs, newest first."""
+    from timmy.records import VERSION_COLUMNS, list_record_versions
+
+    td = _load_dataset(ctx)
+    versions = list_record_versions(td, timdex_record_id)
+    if not versions:
+        raise click.ClickException(f"No versions found for record {timdex_record_id!r}.")
+    emit_rows(versions, as_json=as_json, columns=VERSION_COLUMNS)
+
+
 if __name__ == "__main__":
     cli()

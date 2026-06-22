@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Timmy &mdash; Runs</title>
+    <title>Timmy &mdash; Sources</title>
     <link
       rel="stylesheet"
       href="https://cdn.datatables.net/2.1.8/css/dataTables.dataTables.min.css"
@@ -20,6 +20,33 @@
       td.num,
       th.num {
         text-align: right;
+      }
+      h2 {
+        font-size: 1.05rem;
+        margin: 2rem 0 0.5rem;
+      }
+      /* Static per-source overview table (rendered server-side). */
+      table.overview {
+        border-collapse: collapse;
+        margin-bottom: 1rem;
+      }
+      table.overview th,
+      table.overview td {
+        border: 1px solid #ddd;
+        padding: 0.3rem 0.6rem;
+        text-align: left;
+      }
+      table.overview th {
+        background: #f3f6fa;
+        font-size: 0.8rem;
+      }
+      table.overview td.num,
+      table.overview th.num {
+        text-align: right;
+      }
+      table.overview a {
+        color: #2a5d9c;
+        text-decoration: none;
       }
       details.filters {
         border: 1px solid #ccc;
@@ -79,12 +106,52 @@
   </head>
   <body>
     {% include "_nav.html" %}
-    <h1>Runs</h1>
+    <h1>Sources</h1>
     <p>
-      Operational view of every ETL run, aggregated straight from
-      <code>metadata.records</code> (no payload reads). One row per
-      <code>run_id</code> &mdash; its record count and action breakdown. Paging,
-      search, and sorting run server-side in DuckDB.
+      Every source in the dataset, with its high-level shape and full ETL run
+      history &mdash; all aggregated straight from <code>metadata</code> (no
+      payload reads, no analysis needed).
+    </p>
+
+    <h2>Overview</h2>
+    <p style="font-size: 0.85rem; color: #555">
+      One row per source. <code>records</code> is the current count
+      (<code>current_records</code>); <code>versions</code> counts every
+      historical row across all runs.
+    </p>
+    <table class="overview">
+      <thead>
+        <tr>
+          <th>source</th>
+          <th class="num">records</th>
+          <th class="num">versions</th>
+          <th class="num">runs</th>
+          <th>first run</th>
+          <th>last run</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in overview %}
+        <tr>
+          <td>
+            <a href="{{ url_for('main.records') }}?f_source={{ row.source }}"
+              >{{ row.source }}</a
+            >
+          </td>
+          <td class="num">{{ "{:,}".format(row.record_count) }}</td>
+          <td class="num">{{ "{:,}".format(row.versions) if row.versions is not none else "" }}</td>
+          <td class="num">{{ "{:,}".format(row.runs) if row.runs is not none else "" }}</td>
+          <td>{{ row.first_run or "" }}</td>
+          <td>{{ row.last_run or "" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <h2>ETL runs</h2>
+    <p style="font-size: 0.85rem; color: #555">
+      One row per <code>run_id</code> &mdash; its record count and action
+      breakdown. Paging, search, and sorting run server-side in DuckDB.
     </p>
 
     <details class="filters">
@@ -187,7 +254,7 @@
         serverSide: true,
         processing: true,
         ajax: {
-          url: "{{ url_for('runs.runs_data') }}",
+          url: "{{ url_for('sources.runs_data') }}",
           data: function (d) {
             FILTER_IDS.forEach((id) => {
               d[id] = document.getElementById(id).value.trim();

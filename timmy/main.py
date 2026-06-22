@@ -2,26 +2,20 @@ from flask import Blueprint, abort, jsonify, render_template, request
 
 from timmy.dataset import dataset_lock, get_app_dataset
 from timmy.filters import IN_FILTER_COLUMNS, SEARCHABLE_COLUMNS, split_csv
+from timmy.records import (
+    RECORD_METADATA_COLUMNS,
+    VERSION_COLUMNS,
+    read_record_version,
+    resolve_current_key,
+)
 from timmy.sources import extract_timdex_fields, get_source_record_format, prettify
 
 main = Blueprint("main", __name__)
 
 # Filter columns and the free-text search set are shared, Flask-free, with the
 # analysis build (see timmy.filters): IN_FILTER_COLUMNS, SEARCHABLE_COLUMNS.
-
-# Full set of metadata fields shown at the top of the record detail page, in
-# display order. These are TDA's TIMDEXRecords.METADATA_COLUMNS.
-RECORD_METADATA_COLUMNS = [
-    "timdex_record_id",
-    "source",
-    "run_date",
-    "run_type",
-    "action",
-    "run_id",
-    "run_record_offset",
-    "run_timestamp",
-    "filename",
-]
+# RECORD_METADATA_COLUMNS / VERSION_COLUMNS + the single-version read path are
+# shared, Flask-free, with the CLI `record` commands (see timmy.records).
 
 # Metadata-only columns surfaced in the records table. These all live in
 # metadata.current_records and can be served straight from DuckDB without the
@@ -43,19 +37,6 @@ SELECT_EXPRESSIONS = {
     "run_date": "cast(run_date as date)::varchar",
     "run_timestamp": "cast(run_timestamp as timestamp)::varchar",
 }
-
-# Columns fetched for the per-record versions page. source/timdex_record_id are
-# constant across the page (shown in the header), so source is fetched only to
-# populate that header and is not a displayed row column.
-VERSION_COLUMNS = [
-    "source",
-    "run_timestamp",
-    "run_date",
-    "run_type",
-    "action",
-    "run_id",
-    "run_record_offset",
-]
 
 # Per-row columns actually rendered in the versions table (run_timestamp first
 # as the finer-grained sort key); same shape as the list view minus the
@@ -233,21 +214,13 @@ def _fetch_record_version(
 ) -> dict | None:
     """Read a single record version (incl. payloads) by its composite key.
 
-    Reads from table='records' so any historical version is reachable, not just
-    the current one. The typed equality filters are parameterized by TDA, so the
-    URL values are not interpolated into raw SQL. Returns None if not found.
+    Thin web wrapper over ``timmy.records.read_record_version`` that holds the
+    app's ``dataset_lock`` around the shared, threaded connection.
     """
     with dataset_lock:
-        matches = list(
-            get_app_dataset().records.read_dicts_iter(
-                table="records",
-                timdex_record_id=timdex_record_id,
-                run_id=run_id,
-                run_record_offset=run_record_offset,
-                limit=1,
-            )
+        return read_record_version(
+            get_app_dataset(), timdex_record_id, run_id, run_record_offset
         )
-    return matches[0] if matches else None
 
 
 @main.get("/record/<timdex_record_id>/versions")
@@ -318,13 +291,8 @@ def record_current(timdex_record_id: str) -> str:
     from metadata.current_records, then renders the same detail page as the
     verbose version route.
     """
-    conn = get_app_dataset().conn
     with dataset_lock:
-        key = conn.execute(
-            "select run_id, run_record_offset from metadata.current_records "
-            "where timdex_record_id = ? limit 1",
-            [timdex_record_id],
-        ).fetchone()
+        key = resolve_current_key(get_app_dataset(), timdex_record_id)
     if key is None:
         abort(404, description="No current version found for that record id.")
 

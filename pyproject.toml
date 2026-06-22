@@ -21,6 +21,16 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["timmy"]
+# Runtime data files (templates loaded by Flask, docs/*.md read by
+# timmy.docsgen via importlib.resources). Excluded from the normal, VCS-aware
+# file selection and force-included instead, so they ship unconditionally even
+# if a future .gitignore pattern would otherwise drop them. The exclude prevents
+# the double-add that force-include + default selection would otherwise cause.
+exclude = ["timmy/templates", "timmy/docs"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"timmy/templates" = "timmy/templates"
+"timmy/docs" = "timmy/docs"
 
 [tool.uv.sources]
 timdex-dataset-api = { git = "https://github.com/MITLibraries/timdex-dataset-api" }
