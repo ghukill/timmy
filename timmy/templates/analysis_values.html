@@ -72,10 +72,10 @@
       with the value; <code>occurrences</code> = total times it appears;
       <code>% of path</code> = the value's share of that path's values (low for
       free text, high for controlled vocabulary). Click a value to see the
-      records that carry it. When the path belongs to a complex (object) field,
-      an <span class="objlink">object</span> link opens the holistic parent
-      object with all its member fields, e.g. <code>kind</code> +
-      <code>value</code>.
+      records that carry it &mdash; or, when the path belongs to a complex
+      (object) field, the holistic parent object: one row per instance with all
+      its member fields (e.g. <code>kind</code> + <code>value</code>), each
+      linked back to its record.
     </p>
 
     {% if object_prefix %}
@@ -169,23 +169,21 @@
           { data: "path" },
           {
             data: "value",
-            // Click a value -> records carrying it; for object fields, also a
-            // chip linking to the holistic parent object.
+            // Click a value -> records carrying it. For object fields it goes
+            // straight to the holistic parent object instead (one row per
+            // instance, member fields as columns, each with its own record
+            // link), which subsumes the plain records drill for these paths.
             render: function (data, type, row) {
               if (type !== "display" || data === null) return data;
-              const wrap = document.createElement("span");
+              const isObject = OBJECT_PATHS.has(row.path);
               const a = document.createElement("a");
-              a.href = drillHref(RECORDS_DRILL, row.path, data);
+              a.href = drillHref(
+                isObject ? OBJECT_DRILL : RECORDS_DRILL,
+                row.path,
+                data
+              );
               a.textContent = data; // textContent escapes the value
-              wrap.appendChild(a);
-              if (OBJECT_PATHS.has(row.path)) {
-                const obj = document.createElement("a");
-                obj.href = drillHref(OBJECT_DRILL, row.path, data);
-                obj.textContent = "object";
-                obj.className = "objlink";
-                wrap.appendChild(obj);
-              }
-              return wrap.outerHTML;
+              return a.outerHTML;
             },
           },
           { data: "documents" },
