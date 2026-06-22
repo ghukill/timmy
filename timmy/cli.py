@@ -27,6 +27,7 @@ from timmy.config import (
     resolve_config,
 )
 from timmy.filters import build_tda_filter, filter_label, split_csv
+from timmy.logging_setup import apply_log_level, normalize_level
 from timmy.output import emit_csv, emit_json, emit_record, emit_rows
 
 # Cap rows pulled by `analysis query`; one extra is fetched to detect overflow.
@@ -106,11 +107,13 @@ def _validate_dataset(location: str) -> str | None:
 @cli.command("init")
 @click.option("--dataset-location", default=None, help="Dataset location (skip the prompt).")
 @click.option("--analysis-dir", default=None, help="Analysis output directory (skip the prompt).")
+@click.option("--log-level", default=None, help="Log level, e.g. INFO or DEBUG (skip the prompt).")
 @click.option("--no-input", is_flag=True, help="Non-interactive: use flags/current config, no prompts.")
 @click.option("--force", is_flag=True, help="Overwrite an existing config without confirming.")
 def init(
     dataset_location: str | None,
     analysis_dir: str | None,
+    log_level: str | None,
     no_input: bool,
     force: bool,
 ) -> None:
@@ -130,14 +133,21 @@ def init(
     current = load_config()
     ds = dataset_location or current.get("dataset_location")
     adir = analysis_dir or current.get("analysis_dir")
+    level = log_level or current.get("log_level")
 
     if not no_input:
         ds = click.prompt("TIMDEX dataset location", default=ds or "", show_default=bool(ds))
         adir = click.prompt("Analysis output directory", default=adir)
+        level = click.prompt("Log level (INFO, DEBUG, …)", default=level)
 
     ds = (ds or "").strip() or None
     if not ds:
         raise click.ClickException("dataset_location is required.")
+
+    try:
+        level = normalize_level(level)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     err = _validate_dataset(ds)
     if err:
@@ -151,6 +161,7 @@ def init(
     payload: dict[str, Any] = {"dataset_location": ds}
     if adir:
         payload["analysis_dir"] = adir
+    payload["log_level"] = level
 
     USER_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with USER_CONFIG_PATH.open("wb") as fh:
@@ -486,7 +497,7 @@ def analysis_build(
     label = filter_label(where_combined, filters, limit)
     table = "records" if all_versions else "current_records"
 
-    _configure_cli_logging()
+    _configure_cli_logging(ctx)
     click.echo(f"Building analysis ({label})…", err=True)
     td = _load_dataset(ctx)
     try:
@@ -515,13 +526,18 @@ def analysis_build(
         emit_record(manifest, as_json=False)
 
 
-def _configure_cli_logging() -> None:
-    """Send INFO logs (e.g. build_analysis's summary) to stderr for a CLI run."""
+def _configure_cli_logging(ctx: click.Context) -> None:
+    """Send logs (e.g. build_analysis's summary) to stderr for a CLI run.
+
+    The level comes from the resolved ``log_level`` config (default INFO), so a
+    ``log_level = "DEBUG"`` in ~/.timmy/config.toml turns on DEBUG here and in TDA.
+    """
+    log_level = load_config(ctx.obj["overrides"]).get("log_level")
     logging.basicConfig(
         stream=sys.stderr,
-        level=logging.INFO,
         format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
     )
+    apply_log_level(log_level)
 
 
 @analysis.command("delete")

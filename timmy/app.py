@@ -8,6 +8,7 @@ from flask import Flask
 from timmy.analysis_views import analysis_bp
 from timmy.config import default_flask_config, load_config, to_flask_config
 from timmy.dataset import load_dataset
+from timmy.logging_setup import apply_log_level
 from timmy.main import main
 from timmy.sources_views import sources_bp
 
@@ -21,7 +22,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 
 def configure_logging(app: Flask) -> None:
-    log_level = app.config["LOG_LEVEL"].upper()
+    log_level = apply_log_level(app.config["LOG_LEVEL"])
 
     dictConfig(
         {

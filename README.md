@@ -39,10 +39,11 @@ timmy --help        # confirm it’s installed
    timmy init
    ```
 
-   It prompts for the **dataset location** (a local path or `s3://…`) and the
-   directory where analyses are stored (defaults to `~/.timmy/analyses`). If the
-   dataset is on S3, make sure your **AWS credentials** are set in the
-   environment first.
+   It prompts for the **dataset location** (a local path or `s3://…`), the
+   directory where analyses are stored (defaults to `~/.timmy/analyses`), and the
+   **log level** (`INFO` by default; set `DEBUG` to trace Timmy and the
+   underlying timdex_dataset_api). If the dataset is on S3, make sure your **AWS
+   credentials** are set in the environment first.
 
 2. **Check what it resolved** (config layers: flags > env > `./timmy.toml` >
    `~/.timmy/config.toml` > defaults):

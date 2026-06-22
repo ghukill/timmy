@@ -12,6 +12,8 @@ import json
 from xml.dom import minidom
 from xml.parsers.expat import ExpatError
 
+from timmy.analysis.flatten import EAVRow, flatten_record
+
 # Format of each source's source_record payload.
 SOURCE_RECORD_FORMATS: dict[str, str] = {
     "alma": "xml",
@@ -62,6 +64,25 @@ def extract_timdex_fields(payload: bytes | str | None) -> dict[str, str | None]:
             if isinstance(value, str) and value:
                 fields[key] = value
     return fields
+
+
+def flatten_transformed(payload: bytes | str | None) -> list[EAVRow]:
+    """Flatten a transformed_record (always JSON) into its EAV leaf rows.
+
+    This is the same pure flattener the analysis build uses, run live against one
+    record so the record detail page can show how its JSON decomposes into the
+    EAV model. Missing/unparseable/non-object payloads yield an empty list.
+    """
+    text = _to_text(payload).strip()
+    if not text:
+        return []
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    return flatten_record(data)
 
 
 def prettify(payload: bytes | str | None, fmt: str) -> str:

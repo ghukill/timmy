@@ -21,23 +21,27 @@
         font-family: ui-monospace, monospace;
         font-size: 0.85rem;
       }
-      details.filters {
+      details.filters,
+      details.analyses {
         border: 1px solid #ccc;
         border-radius: 6px;
         padding: 0.5rem 1rem 1rem;
         margin-bottom: 1.5rem;
       }
-      details.filters summary {
+      details.filters summary,
+      details.analyses summary {
         cursor: pointer;
         font-weight: 600;
       }
-      .filters .grid {
+      .filters .grid,
+      .analyses .grid {
         display: grid;
         grid-template-columns: 1fr 1fr;
         gap: 0.75rem 1.5rem;
         margin-top: 1rem;
       }
-      .filters label {
+      .filters label,
+      .analyses label {
         display: flex;
         flex-direction: column;
         font-size: 0.85rem;
@@ -51,16 +55,19 @@
         align-items: center;
         gap: 0.5rem;
       }
-      .filters input {
+      .filters input,
+      .analyses input {
         padding: 0.35rem 0.5rem;
         font-family: ui-monospace, monospace;
       }
-      .filters .actions {
+      .filters .actions,
+      .analyses .actions {
         margin-top: 1rem;
         display: flex;
         gap: 0.5rem;
       }
-      .filters .warn {
+      .filters .warn,
+      .analyses .warn {
         color: #a15c00;
         font-size: 0.75rem;
       }
@@ -71,12 +78,10 @@
         min-height: 70px;
         font-size: 0.85rem;
       }
-      .analysis-bar {
-        display: flex;
-        align-items: center;
-        gap: 0.75rem;
-        flex-wrap: wrap;
-        margin-bottom: 1.5rem;
+      .analyses .intro {
+        font-size: 0.85rem;
+        margin-top: 1rem;
+        margin-bottom: 0;
       }
     </style>
   </head>
@@ -143,16 +148,27 @@
       </div>
     </details>
 
-    <div class="analysis-bar">
-      <input type="text" id="analysis_name" placeholder="analysis name (optional)" />
-      <input type="text" id="analysis_notes" placeholder="notes (optional)" />
-      <button type="button" id="run-analysis">Run TIMDEX Metadata Analysis</button>
-      <a href="{{ url_for('analysis.index') }}">View past analyses</a>
-      <span class="warn"
-        >Flattens the transformed JSON of the current filter into a queryable
-        DuckDB analysis. Runs synchronously &mdash; may take a while.</span
-      >
-    </div>
+    <details class="analyses">
+      <summary>Analyses</summary>
+      <p class="intro">
+        Build a new analysis from the <strong>current filter</strong>: Timmy
+        flattens the transformed JSON of every matching record into a queryable
+        DuckDB analysis. Runs synchronously &mdash; may take a while.
+      </p>
+      <div class="grid">
+        <label>
+          name <span class="warn">optional</span>
+          <input type="text" id="analysis_name" placeholder="e.g. alma-subjects" />
+        </label>
+        <label>
+          notes <span class="warn">optional</span>
+          <input type="text" id="analysis_notes" placeholder="what you're investigating" />
+        </label>
+      </div>
+      <div class="actions">
+        <button type="button" id="run-analysis">Build TIMDEX Metadata Analysis</button>
+      </div>
+    </details>
 
     <table id="records" class="display" style="width: 100%">
       <thead>

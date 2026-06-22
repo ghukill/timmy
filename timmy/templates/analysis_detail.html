@@ -493,12 +493,15 @@
           "/" +
           encodeURIComponent(runId) +
           "/" +
-          encodeURIComponent(offset)
+          encodeURIComponent(offset) +
+          "?analysis={{ analysis_id }}"
         );
       }
 
       function currentRecordHref(id) {
-        return RECORD_BASE + encodeURIComponent(id);
+        return (
+          RECORD_BASE + encodeURIComponent(id) + "?analysis={{ analysis_id }}"
+        );
       }
 
       function render(payload) {

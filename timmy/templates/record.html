@@ -86,6 +86,61 @@
         color: #999;
         font-style: italic;
       }
+      .context-note {
+        font-size: 0.85rem;
+        background: #f4f7ff;
+        border: 1px solid #d6e0f5;
+        border-radius: 4px;
+        padding: 0.6rem 0.9rem;
+        margin-bottom: 0.9rem;
+      }
+      .context-note.plain {
+        background: #fafafa;
+        border-color: #e0e0e0;
+        color: #555;
+      }
+      .flat-wrap {
+        max-height: 540px;
+        overflow: auto;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+      }
+      table.flat {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 0.8rem;
+        font-family: ui-monospace, monospace;
+      }
+      table.flat th,
+      table.flat td {
+        text-align: left;
+        padding: 0.25rem 0.6rem;
+        border-bottom: 1px solid #eee;
+        vertical-align: top;
+      }
+      table.flat td.value {
+        word-break: break-all;
+      }
+      table.flat th.field-path,
+      table.flat td.field-path {
+        white-space: nowrap;
+        width: 1px;
+        padding-right: 1.5rem;
+      }
+      table.flat thead th {
+        position: sticky;
+        top: 0;
+        background: #fff;
+        border-bottom: 1px solid #ccc;
+        font-family: system-ui, sans-serif;
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: #555;
+      }
+      .flat-null {
+        color: #aaa;
+      }
     </style>
   </head>
   <body>
@@ -138,6 +193,66 @@
       <pre><code class="language-json">{{ transformed_pretty }}</code></pre>
       {% else %}
       <p class="empty">No transformed_record payload for this record.</p>
+      {% endif %}
+    </section>
+
+    <section>
+      <h2>Flattened fields <span class="badge">{{ eav_rows|length }} rows</span></h2>
+      {% if eav_rows %}
+      {% if analysis_ctx %}
+      <p class="context-note">
+        Flattened live from this record's transformed JSON. You arrived from
+        analysis
+        <a href="{{ url_for('analysis.detail', analysis_id=analysis_ctx.id) }}"><strong>{{ analysis_ctx.label }}</strong></a>,
+        so the field path and value links below explore within that analysis's
+        corpus.
+      </p>
+      {% else %}
+      <p class="context-note plain">
+        Flattened live from this record's transformed JSON. You didn't arrive
+        from an analysis, so field paths and values aren't clickable &mdash; open
+        a record from an analysis drill-down to explore its values across that
+        corpus.
+      </p>
+      {% endif %}
+      <div class="flat-wrap">
+        <table class="flat">
+          <thead>
+            <tr>
+              <th class="field-path">Field Path</th>
+              <th>value</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in eav_rows %}
+            <tr>
+              <td class="field-path">
+                {% if analysis_ctx %}
+                <a
+                  href="{{ url_for('analysis.values', analysis_id=analysis_ctx.id, prefix=row.path) }}"
+                  title="Explore values at {{ row.path }} across {{ analysis_ctx.label }}"
+                  >{{ row.path }}</a
+                >
+                {% else %}{{ row.path }}{% endif %}
+              </td>
+              <td class="value">
+                {% if row.value is none %}
+                <span class="flat-null">&mdash;</span>
+                {% elif analysis_ctx %}
+                <a
+                  href="{{ url_for('analysis.value_records_page', analysis_id=analysis_ctx.id, path=row.path, value=row.value) }}"
+                  title="Records where {{ row.path }} = this value in {{ analysis_ctx.label }}"
+                  >{{ row.value }}</a
+                >
+                {% else %}{{ row.value }}{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <p class="empty">No transformed_record payload to flatten.</p>
       {% endif %}
     </section>
 

@@ -1,4 +1,4 @@
-from flask import Blueprint, abort, jsonify, render_template, request
+from flask import Blueprint, abort, current_app, jsonify, render_template, request
 
 from timmy.dataset import dataset_lock, get_app_dataset
 from timmy.filters import IN_FILTER_COLUMNS, SEARCHABLE_COLUMNS, split_csv
@@ -8,7 +8,12 @@ from timmy.records import (
     read_record_version,
     resolve_current_key,
 )
-from timmy.sources import extract_timdex_fields, get_source_record_format, prettify
+from timmy.sources import (
+    extract_timdex_fields,
+    flatten_transformed,
+    get_source_record_format,
+    prettify,
+)
 
 main = Blueprint("main", __name__)
 
@@ -56,11 +61,7 @@ MAX_PAGE_LENGTH = 200
 
 @main.get("/")
 def index() -> str:
-    td = get_app_dataset()
-    return render_template(
-        "index.html",
-        td=td,
-    )
+    return render_template("index.html")
 
 
 @main.get("/records")
@@ -256,6 +257,31 @@ def record_versions(timdex_record_id: str) -> str:
     )
 
 
+def _resolve_analysis_context(analysis_id: str | None) -> dict | None:
+    """Validate an ``?analysis=<id>`` param and return its display context.
+
+    The EAV table's path/value links only make sense relative to a corpus, so a
+    record drilled into *from* an analysis carries that id forward. Returns
+    ``{"id", "label"}`` for a real analysis, or ``None`` when the param is
+    absent, malformed, or names an analysis that no longer exists -- in which
+    case the table renders its leaves as plain (unlinked) text.
+    """
+    if not analysis_id:
+        return None
+    from timmy import analysis
+
+    if not analysis.is_valid_analysis_id(analysis_id):
+        return None
+    try:
+        manifest = analysis.read_manifest(
+            current_app.config["TIMDEX_ANALYSIS_DIR"], analysis_id
+        )
+    except FileNotFoundError:
+        return None
+    label = manifest.get("name") or manifest.get("label") or analysis_id
+    return {"id": analysis_id, "label": label}
+
+
 def _render_record_detail(
     timdex_record_id: str, run_id: str, run_record_offset: int
 ) -> str:
@@ -280,6 +306,8 @@ def _render_record_detail(
         source_format=source_format,
         source_pretty=prettify(rec.get("source_record"), source_format),
         transformed_pretty=prettify(rec.get("transformed_record"), "json"),
+        eav_rows=flatten_transformed(rec.get("transformed_record")),
+        analysis_ctx=_resolve_analysis_context(request.args.get("analysis")),
     )
 
 
