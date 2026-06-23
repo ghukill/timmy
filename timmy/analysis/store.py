@@ -147,7 +147,19 @@ create table manifest (
     name text,
     notes text
 );
+
+create table field_usage_report (
+    computed_at timestamp,
+    report_json text
+);
 """
+
+# Single-row table caching the (expensive) schema-overview report so the analysis
+# landing page is instant instead of re-scanning the whole eav table on every
+# view. The report is the JSON-serialized output of top_level_fields(); at the
+# multi-million-record scale that computation takes minutes, so it is materialized
+# once at build time (see scratch/ideas.md "Analysis build performance").
+FIELD_USAGE_REPORT_TABLE = "field_usage_report"
 
 
 # The shape new_analysis_id() produces: <UTC stamp>-<8 hex>. Validating against
@@ -279,6 +291,10 @@ def build_analysis(
                 notes,
             ],
         )
+
+        # Materialize the schema-overview report now so the landing page never
+        # has to recompute it (a multi-minute full scan at the 5m-record scale).
+        _write_report_cache(con, top_level_fields(con))
     except Exception:
         con.close()
         building_path.unlink(missing_ok=True)
@@ -895,6 +911,84 @@ def top_level_fields(conn: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
 
     fields.sort(key=lambda f: (-f["doc_count"], f["field"]))
     return fields
+
+
+def _report_cache_exists(conn: duckdb.DuckDBPyConnection) -> bool:
+    """True if this DB has the field-usage cache table (older builds lack it)."""
+    return bool(
+        conn.execute(
+            "select count(*) from information_schema.tables where table_name = ?",
+            [FIELD_USAGE_REPORT_TABLE],
+        ).fetchone()[0]
+    )
+
+
+def _write_report_cache(
+    conn: duckdb.DuckDBPyConnection, report: list[dict[str, Any]]
+) -> None:
+    """Materialize ``report`` as the single cached field-usage row (replacing any).
+
+    Requires a read-write connection. Creates the cache table if missing so this
+    also backfills analyses built before the cache existed.
+    """
+    conn.execute(
+        f"create table if not exists {FIELD_USAGE_REPORT_TABLE} "  # noqa: S608
+        "(computed_at timestamp, report_json text)"
+    )
+    conn.execute(f"delete from {FIELD_USAGE_REPORT_TABLE}")  # noqa: S608
+    conn.execute(
+        f"insert into {FIELD_USAGE_REPORT_TABLE} values (?, ?)",  # noqa: S608
+        [datetime.now(timezone.utc), json.dumps(report, default=str)],
+    )
+
+
+def _read_report_cache(
+    conn: duckdb.DuckDBPyConnection,
+) -> list[dict[str, Any]] | None:
+    """Return the cached field-usage report, or None if not cached yet."""
+    if not _report_cache_exists(conn):
+        return None
+    row = conn.execute(
+        f"select report_json from {FIELD_USAGE_REPORT_TABLE} limit 1"  # noqa: S608
+    ).fetchone()
+    if not row or not row[0]:
+        return None
+    return json.loads(row[0])
+
+
+def get_field_usage_report(
+    analyses_dir: str | os.PathLike[str], analysis_id: str
+) -> list[dict[str, Any]]:
+    """The schema-overview report for an analysis, served from cache.
+
+    Reads the precomputed report (materialized at build time). For an analysis
+    built before caching existed -- which has no cached row -- it computes the
+    report once and persists it, so the first view pays the cost and every later
+    view is instant. The backfill write is best-effort: if the DB can't be opened
+    read-write (e.g. a concurrent reader holds it), the freshly computed report is
+    still returned, just not cached this time.
+    """
+    conn = open_analysis(analyses_dir, analysis_id, read_only=True)
+    try:
+        cached = _read_report_cache(conn)
+    finally:
+        conn.close()
+    if cached is not None:
+        return cached
+
+    # Cache miss (legacy DB): compute, then backfill so it's instant next time.
+    conn = open_analysis(analyses_dir, analysis_id, read_only=False)
+    try:
+        report = top_level_fields(conn)
+        try:
+            _write_report_cache(conn, report)
+        except Exception:  # noqa: BLE001 -- caching is best-effort
+            logger.warning(
+                "Could not cache field-usage report for %s", analysis_id, exc_info=True
+            )
+    finally:
+        conn.close()
+    return report
 
 
 def _member_label(member_path: str, object_prefix: str) -> str:

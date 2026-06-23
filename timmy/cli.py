@@ -279,13 +279,16 @@ def analysis_fields(
     ctx: click.Context, analysis_id: str, field: str | None, as_json: bool
 ) -> None:
     """Per-field coverage: type, coverage_pct, cardinality, distinct values."""
-    from timmy.analysis import top_level_fields
+    from timmy.analysis import get_field_usage_report, is_valid_analysis_id
 
-    conn = _open(ctx, analysis_id)
+    if not is_valid_analysis_id(analysis_id):
+        raise click.ClickException(f"Not a valid analysis id: {analysis_id!r}")
     try:
-        rows = top_level_fields(conn)
-    finally:
-        conn.close()
+        # Served from the build-time cache (computed + backfilled on first read
+        # for legacy DBs) so this stays instant at the multi-million-record scale.
+        rows = get_field_usage_report(_analyses_dir(ctx), analysis_id)
+    except FileNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
     if field:
         rows = [r for r in rows if r["field"] == field]
         if not rows:

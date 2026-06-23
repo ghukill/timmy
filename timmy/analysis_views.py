@@ -172,16 +172,14 @@ def detail(analysis_id: str) -> str:
     _check_analysis_id(analysis_id)
     try:
         manifest = analysis.read_manifest(_analyses_dir(), analysis_id)
-        conn = analysis.open_analysis(_analyses_dir(), analysis_id, read_only=True)
-    except FileNotFoundError:
-        abort(404)
-    try:
         # One row per top-level field, typed (string / array[string] / object /
         # array[object]); complex fields drill into the object view, scalar fields
         # into the values view. Member/leaf detail lives in the drill, not here.
-        report = analysis.top_level_fields(conn)
-    finally:
-        conn.close()
+        # Served from the cache materialized at build time (a full eav scan at the
+        # 5m-record scale); legacy DBs are computed + backfilled on first view.
+        report = analysis.get_field_usage_report(_analyses_dir(), analysis_id)
+    except FileNotFoundError:
+        abort(404)
     return render_template(
         "analysis_detail.html",
         analysis_id=analysis_id,
