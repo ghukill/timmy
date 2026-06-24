@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Timmy &mdash; Analysis {{ analysis_id }}</title>
+    <title>Timmy &mdash; Metadata corpus</title>
     <link
       rel="stylesheet"
       href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css"
@@ -23,41 +23,33 @@
       }
       h1 {
         font-size: 1.3rem;
-        word-break: break-all;
       }
-      p.subtitle {
-        margin-top: -0.5rem;
-        font-family: ui-monospace, monospace;
-        font-size: 0.8rem;
-        color: #999;
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+        margin: 0.5rem 0 1rem;
       }
-      .inline-delete {
+      .toolbar form {
         display: inline;
+      }
+      button.act {
+        font-size: 0.8rem;
+        padding: 0.3rem 0.7rem;
+        border: 1px solid #c3d2e4;
+        background: #f4f8fd;
+        border-radius: 4px;
+        cursor: pointer;
       }
       button.danger {
         color: #b00020;
         border: 1px solid #e0b4bc;
         background: #fff;
         font-size: 0.8rem;
-        padding: 0.2rem 0.5rem;
+        padding: 0.3rem 0.7rem;
         border-radius: 4px;
         cursor: pointer;
-      }
-      .edit-form label {
-        display: block;
-        font-size: 0.85rem;
-        color: #444;
-        margin-bottom: 0.5rem;
-      }
-      .edit-form input,
-      .edit-form textarea {
-        display: block;
-        width: 100%;
-        max-width: 640px;
-        margin-top: 0.2rem;
-        padding: 0.35rem 0.5rem;
-        font-family: inherit;
-        font-size: 0.85rem;
       }
       section {
         margin-top: 2rem;
@@ -89,6 +81,45 @@
         font-family: ui-monospace, monospace;
         word-break: break-all;
       }
+      /* Scope filter */
+      .scope {
+        border: 1px solid #d8e2ee;
+        border-radius: 6px;
+        background: #f8fafd;
+        padding: 0.6rem 0.9rem;
+        margin-top: 0.5rem;
+      }
+      .scope summary {
+        cursor: pointer;
+        font-size: 0.9rem;
+        font-weight: 600;
+        color: #2c4a6e;
+      }
+      .scope .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 0.6rem;
+        margin: 0.75rem 0 0.5rem;
+      }
+      .scope label {
+        display: block;
+        font-size: 0.78rem;
+        color: #444;
+      }
+      .scope input {
+        display: block;
+        width: 100%;
+        margin-top: 0.2rem;
+        padding: 0.3rem 0.45rem;
+        font-family: ui-monospace, monospace;
+        font-size: 0.8rem;
+        box-sizing: border-box;
+      }
+      .scope .actions {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+      }
       .examples {
         display: flex;
         flex-wrap: wrap;
@@ -106,7 +137,6 @@
         height: auto;
         min-height: 220px;
         font-size: 0.85rem;
-        /* Drag the bottom-right corner to resize the editor taller/shorter. */
         resize: vertical;
         overflow: auto;
       }
@@ -124,7 +154,6 @@
         color: #b00020;
         font-family: ui-monospace, monospace;
       }
-      /* SQL console results render as a client-side DataTable. */
       #results-wrap {
         margin-top: 1rem;
       }
@@ -140,6 +169,28 @@
       }
       .report-wrap {
         margin-top: 0.75rem;
+      }
+      .report-loading {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        color: #666;
+        font-size: 0.85rem;
+        padding: 1rem 0;
+      }
+      .report-loading .spin {
+        width: 16px;
+        height: 16px;
+        flex: none;
+        border: 2px solid #cdd9e8;
+        border-top-color: #7aa7d8;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
       }
       table.report {
         width: 100%;
@@ -159,11 +210,9 @@
       table.report td.num {
         text-align: right;
       }
-      /* Every doc in the corpus populates this field. */
       table.report tr.full td {
         background: #eafaef;
       }
-      /* Parent-object field rows (e.g. dates[]) link to the object view. */
       a.obj-field {
         color: #6b3fb3;
         font-weight: 600;
@@ -175,7 +224,6 @@
         font-weight: 400;
         color: #9b7fd0;
       }
-      /* Inferred python-style type; complex (object) types stand out. */
       span.ftype {
         color: #777;
       }
@@ -210,12 +258,6 @@
         color: #999;
         font-size: 0.7rem;
       }
-      .pct-unique {
-        color: #999;
-        font-size: 0.7rem;
-        white-space: nowrap;
-      }
-      /* Keep the min/avg/max triplet on one line; dim the separators. */
       th.shape-col {
         white-space: nowrap;
       }
@@ -237,48 +279,66 @@
   </head>
   <body>
     {% include "_nav.html" %}
-    <p>
-      <a class="back" href="{{ url_for('main.records') }}">&larr; Back to records</a>
-      &nbsp;&middot;&nbsp;
-      <a class="back" href="{{ url_for('analysis.index') }}">All analyses</a>
-      &nbsp;&middot;&nbsp;
+    <p><a class="back" href="{{ url_for('main.records') }}">&larr; Back to records</a></p>
+
+    <h1>TIMDEX metadata corpus</h1>
+
+    <div class="toolbar">
+      <form method="POST" action="{{ url_for('analysis.update') }}">
+        <button type="submit" class="act" title="Reconcile with the live dataset">Update corpus</button>
+      </form>
       <form
-        class="inline-delete"
         method="POST"
-        action="{{ url_for('analysis.delete', analysis_id=analysis_id) }}"
-        onsubmit="return confirm('Delete this analysis? This permanently removes its DuckDB file and cannot be undone.');"
+        action="{{ url_for('analysis.build') }}"
+        onsubmit="return confirm('Rebuild the entire corpus from scratch? This replaces the current one.');"
       >
-        <button type="submit" class="danger">Delete analysis</button>
+        <button type="submit" class="act">Rebuild</button>
       </form>
-    </p>
-    <h1>{{ manifest.name if manifest.name else analysis_id }}</h1>
-    {% if manifest.name %}<p class="subtitle">{{ analysis_id }}</p>{% endif %}
+      <form
+        method="POST"
+        action="{{ url_for('analysis.delete') }}"
+        onsubmit="return confirm('Delete the corpus? A rebuild recreates it.');"
+      >
+        <button type="submit" class="danger">Delete</button>
+      </form>
+    </div>
+
+    {% set whole_corpus_url = url_for('analysis.index') %}
+    {% set doc_count = meta.doc_count %}
+    {% include "_scope_banner.html" %}
+
+    <details class="scope" {{ 'open' if scoped }}>
+      <summary>Scope to a subset</summary>
+      <form method="GET" action="{{ url_for('analysis.index') }}">
+        <div class="grid">
+          <label>source
+            <input name="f_source" value="{{ scope_args.get('f_source', '') }}" placeholder="alma, dspace" /></label>
+          <label>run_type
+            <input name="f_run_type" value="{{ scope_args.get('f_run_type', '') }}" placeholder="daily, full" /></label>
+          <label>action
+            <input name="f_action" value="{{ scope_args.get('f_action', '') }}" placeholder="index" /></label>
+          <label>run_id
+            <input name="f_run_id" value="{{ scope_args.get('f_run_id', '') }}" /></label>
+          <label>where (raw SQL over docs)
+            <input name="f_where" value="{{ scope_args.get('f_where', '') }}" placeholder="run_date &gt; '2026-01-01'" /></label>
+        </div>
+        <div class="actions">
+          <button type="submit" class="act">Apply scope</button>
+          <a class="back" href="{{ url_for('analysis.index') }}">reset</a>
+        </div>
+      </form>
+    </details>
 
     <section>
-      <h2>Name &amp; notes</h2>
-      <form method="POST" action="{{ url_for('analysis.update', analysis_id=analysis_id) }}" class="edit-form">
-        <label>
-          name
-          <input type="text" name="name" value="{{ manifest.name if manifest.name else '' }}" placeholder="a memorable name" />
-        </label>
-        <label>
-          notes
-          <textarea name="notes" rows="3" placeholder="why this analysis exists, what to look at, caveats…">{{ manifest.notes if manifest.notes else '' }}</textarea>
-        </label>
-        <button type="submit">Save</button>
-      </form>
-    </section>
-
-    <section>
-      <h2>Manifest</h2>
+      <h2>Corpus</h2>
       <table class="meta">
         <tbody>
-          {% for key in ["label", "created_at", "dataset_location", "table_name",
-                         "filters_json", "where_predicate", "doc_count",
-                         "eav_count", "skipped_count"] %}
+          {% for key in ["created_at", "last_updated_at", "dataset_location",
+                         "doc_count", "eav_count", "skipped_count",
+                         "source_record_count"] %}
           <tr>
             <th>{{ key }}</th>
-            <td>{{ manifest[key] if manifest[key] is not none else "" }}</td>
+            <td>{{ meta[key] if meta[key] is not none else "" }}</td>
           </tr>
           {% endfor %}
         </tbody>
@@ -286,86 +346,39 @@
     </section>
 
     <section>
-      <h2>Schema overview</h2>
+      <h2>Schema overview{% if scoped %} <span class="cov-count">(subset)</span>{% endif %}</h2>
       <p style="font-size: 0.85rem; color: #555">
         One row per top-level field across the
-        {{ "{:,}".format(manifest.doc_count) }} docs in this corpus, with its
-        inferred type. <strong>Complex</strong> fields
-        (<code>array[object]</code>, <code>object</code>) drill into the object
-        view to see member structure; scalar fields drill into their values.
-        <em>per record</em> is the field's cardinality within a single record
-        (min&nbsp;/&nbsp;avg&nbsp;/&nbsp;max). Fields every doc populates are
+        {{ "{:,}".format(doc_total) }} docs in
+        {{ "this subset" if scoped else "the corpus" }}, with its inferred type.
+        <strong>Complex</strong> fields (<code>array[object]</code>,
+        <code>object</code>) drill into the object view; scalar fields drill into
+        their values. <em>per record</em> is the field's cardinality within a single
+        record (min&nbsp;/&nbsp;avg&nbsp;/&nbsp;max). Fields every doc populates are
         tinted green.
       </p>
-      {% if not report %}
-      <p class="empty">No fields &mdash; this corpus produced no flattened rows.</p>
-      {% else %}
-      <div class="report-wrap">
-        <table class="report" id="report" style="width: 100%">
-          <thead>
-            <tr>
-              <th>field</th>
-              <th>type</th>
-              <th>coverage</th>
-              <th class="num shape-col" title="Cardinality within a single record: min / avg / max. Shown for array fields.">Counts per Record</th>
-              <th class="num">distinct</th>
-              <th>sample / members</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for f in report %}
-            <tr class="{{ 'full' if f.coverage_pct == 100 else '' }}">
-              <td>
-                {% if f.is_complex %}
-                <a
-                  class="obj-field"
-                  title="Drill into {{ f.field }} objects"
-                  href="{{ url_for('analysis.object_page', analysis_id=analysis_id, path=f.drill_path) }}"
-                  >{{ f.field }}</a
-                >
-                {% else %}
-                <a href="{{ url_for('analysis.values', analysis_id=analysis_id, prefix=f.drill_path) }}">{{ f.field }}</a>
-                {% endif %}
-              </td>
-              <td><span class="ftype {{ 'complex' if f.is_complex else '' }}">{{ f.type }}</span></td>
-              <td data-order="{{ f.coverage_pct }}">
-                <div class="cov">
-                  <div class="cov-bar">
-                    <div class="cov-fill" style="width: {{ f.coverage_pct }}%"></div>
-                  </div>
-                  <span class="cov-pct">{{ f.coverage_pct }}%</span>
-                  <span class="cov-count">{{ f.doc_count }}/{{ manifest.doc_count }}</span>
-                </div>
-              </td>
-              <td class="num shape-col" data-order="{{ f.count_max if f.is_array else -1 }}">
-                {% if f.is_array %}<span class="shape"
-                  >{{ f.count_min }}<span class="sep">/</span>{{ f.count_avg }}<span class="sep">/</span>{{ f.count_max }}</span
-                >{% endif %}
-              </td>
-              <td class="num" data-order="{{ f.distinct_values }}">
-                {{ "{:,}".format(f.distinct_values) }}{% if f.is_complex %}
-                <span class="cov-count">objects</span>{% endif %}
-              </td>
-              <td class="sample" title="{{ f.sample_value if f.sample_value is not none else '' }}">
-                {{ f.sample_value if f.sample_value is not none else "" }}
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
+      {# The table is fetched asynchronously so an uncached report over a large subset
+         computes behind this spinner instead of hanging the page (see the script). #}
+      <div id="report-host">
+        <div class="report-loading">
+          <span class="spin"></span>
+          <span
+            >Computing schema overview for {{ "{:,}".format(doc_total) }} docs…{% if report_may_be_slow %}
+            this subset is large, so it may take a few minutes (instant once cached).{% else %}
+            (cached after the first view){% endif %}</span
+          >
+        </div>
       </div>
-      {% endif %}
     </section>
 
     <section>
-      <h2>SQL console</h2>
+      <h2>SQL console{% if scoped %} <span class="cov-count">(scoped)</span>{% endif %}</h2>
       <p style="font-size: 0.85rem; color: #555">
         Read-only SQL over <code>eav</code>, <code>docs</code>, and
-        <code>manifest</code>. Select <code>timdex_record_id</code> to get
-        clickable links to each record (its current form); add
-        <code>run_id</code> and <code>run_record_offset</code> to link a
-        specific version instead. Results capped at
-        {{ "{:,}".format(max_rows) }} rows.
+        <code>corpus_meta</code>. Select <code>timdex_record_id</code> for clickable
+        links to each record. {% if scoped %}With a scope active,
+        <code>eav</code>/<code>docs</code> are restricted to the subset.{% endif %}
+        Results capped at {{ "{:,}".format(max_rows) }} rows.
       </p>
       <div class="examples" id="examples"></div>
       <textarea id="sql"></textarea>
@@ -383,33 +396,42 @@
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
     <script src="https://cdn.datatables.net/2.1.8/js/dataTables.min.js"></script>
     <script>
-      // Make the field-usage report searchable + sortable (client-side). Numeric
-      // columns sort by their data-order value, not rendered text; row classes
-      // (the green 100%-coverage tint) are preserved across sort/paging.
-      if (document.getElementById("report")) {
-        new DataTable("#report", {
-          order: [[2, "desc"]], // coverage desc (the default at-a-glance view)
-          // The field list is bounded (tens of fields), so show every field by
-          // default -- the whole schema at a glance, no paging.
-          pageLength: -1,
-          lengthMenu: [
-            [-1, 100, 50, 25],
-            ["All", 100, 50, 25],
-          ],
-          columnDefs: [{ targets: 5, orderable: false }], // sample / members
-        });
-      }
-
-      const QUERY_URL = "{{ url_for('analysis.query', analysis_id=analysis_id) }}";
-      // Base for record drill-through links: /record/<id>/<run_id>/<offset>.
+      const QUERY_URL = "{{ url_for('analysis.query') }}";
+      const SCOPE = {{ scope_args | tojson }};
+      const SCOPE_QS = {{ scope_qs | tojson }};
       const RECORD_BASE =
         "{{ url_for('main.records') }}".replace(/records$/, "record/");
-      // Built over current_records, so a bare timdex_record_id is enough to
-      // link to a record's current form (no run_id/offset needed).
-      const CURRENT_RECORDS_ANALYSIS =
-        {{ 'true' if manifest.table_name == 'current_records' else 'false' }};
 
-      // Canned starting points; the first is the default editor content.
+      // Load the schema overview asynchronously: the dashboard renders instantly and
+      // the (potentially slow, uncached) report fills in behind the spinner. The
+      // fragment is server-rendered HTML, so all the rich cells + scope-aware drill
+      // links come through unchanged; we just init DataTables on it once injected.
+      (function loadReport() {
+        const host = document.getElementById("report-host");
+        const url =
+          "{{ url_for('analysis.report_fragment') }}" + (SCOPE_QS ? "?" + SCOPE_QS : "");
+        fetch(url)
+          .then((r) => r.text())
+          .then((html) => {
+            host.innerHTML = html;
+            if (document.getElementById("report")) {
+              new DataTable("#report", {
+                order: [[2, "desc"]],
+                pageLength: -1,
+                lengthMenu: [
+                  [-1, 100, 50, 25],
+                  ["All", 100, 50, 25],
+                ],
+                columnDefs: [{ targets: 5, orderable: false }],
+              });
+            }
+          })
+          .catch((e) => {
+            host.innerHTML =
+              '<p class="empty">Could not load the schema overview: ' + e + "</p>";
+          });
+      })();
+
       const EXAMPLES = {
         "Field usage ranking":
           "select path,\n" +
@@ -431,37 +453,11 @@
           "group by value\n" +
           "order by docs desc\n" +
           "limit 50;",
-        "Value length stats":
-          "select min(length(value)) as min_len,\n" +
-          "       max(length(value)) as max_len,\n" +
-          "       round(avg(length(value)), 1) as avg_len\n" +
-          "from eav\n" +
-          "where path = 'title' and value_type = 'string';",
         "Records using a field":
           "select d.timdex_record_id, d.run_id, d.run_record_offset,\n" +
           "       d.source, e.value\n" +
           "from eav e join docs d using (timdex_composite_id)\n" +
           "where e.path = 'contributors[].value'\n" +
-          "limit 100;",
-        "Object member by kind":
-          "-- Parent object lookup: for records where dates[].kind = 'Publication\n" +
-          "-- date', show the value member from the SAME object instance (dates[X]).\n" +
-          "-- EAV leaves are tethered only by sharing an array index in path_indexed.\n" +
-          "--\n" +
-          "-- To adapt this to another field, change these three things:\n" +
-          "--   1. the kind path + value in the WHERE:  dates[].kind / 'Publication date'\n" +
-          "--   2. the member value path:               dates[].value\n" +
-          "--   3. the leaf names in the join below:    '.kind' and '.value'\n" +
-          "select d.timdex_record_id, v.value as member_value\n" +
-          "from eav k\n" +
-          "join eav v\n" +
-          "  on  v.timdex_composite_id = k.timdex_composite_id\n" +
-          "  and v.path = 'dates[].value'\n" +
-          "  -- same element: strip the '.kind' leaf off path_indexed, add '.value'\n" +
-          "  and v.path_indexed =\n" +
-          "        left(k.path_indexed, length(k.path_indexed) - length('.kind')) || '.value'\n" +
-          "join docs d on d.timdex_composite_id = k.timdex_composite_id\n" +
-          "where k.path = 'dates[].kind' and k.value = 'Publication date'\n" +
           "limit 100;",
       };
 
@@ -486,6 +482,14 @@
       const resultsTable = document.getElementById("results");
       let dt = null;
 
+      function currentRecordHref(id) {
+        // Corpus is over current_records, so a bare id links to the current form.
+        return (
+          RECORD_BASE +
+          encodeURIComponent(id) +
+          (SCOPE_QS ? "?" + SCOPE_QS : "")
+        );
+      }
       function recordHref(id, runId, offset) {
         return (
           RECORD_BASE +
@@ -494,34 +498,23 @@
           encodeURIComponent(runId) +
           "/" +
           encodeURIComponent(offset) +
-          "?analysis={{ analysis_id }}"
-        );
-      }
-
-      function currentRecordHref(id) {
-        return (
-          RECORD_BASE + encodeURIComponent(id) + "?analysis={{ analysis_id }}"
+          (SCOPE_QS ? "?" + SCOPE_QS : "")
         );
       }
 
       function render(payload) {
         const { columns, rows, truncated, row_count } = payload;
-
-        // Columns are dynamic per query, so tear down and rebuild each run.
         if (dt) {
           dt.destroy();
           dt = null;
         }
         resultsTable.innerHTML = "";
 
-        // If the key columns are present, link timdex_record_id to its version.
         const idIdx = columns.indexOf("timdex_record_id");
         const runIdx = columns.indexOf("run_id");
         const offIdx = columns.indexOf("run_record_offset");
         const hasFullKey = idIdx !== -1 && runIdx !== -1 && offIdx !== -1;
-        // Link the id when we have the full version key (exact version), or when
-        // the analysis is over current_records (id alone -> current form).
-        const linkId = idIdx !== -1 && (hasFullKey || CURRENT_RECORDS_ANALYSIS);
+        const linkId = idIdx !== -1;
 
         const cols = columns.map((name, i) => {
           if (linkId && i === idIdx) {
@@ -533,13 +526,11 @@
                 a.href = hasFullKey
                   ? recordHref(data, row[runIdx], row[offIdx])
                   : currentRecordHref(data);
-                a.textContent = data; // textContent escapes the value
+                a.textContent = data;
                 return a.outerHTML;
               },
             };
           }
-          // render.text() HTML-escapes cell values (data is trusted-source but
-          // arbitrary, so never inject it as raw HTML).
           return { title: name, render: DataTable.render.text() };
         });
 
@@ -568,7 +559,7 @@
           const resp = await fetch(QUERY_URL, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sql }),
+            body: JSON.stringify(Object.assign({ sql }, SCOPE)),
           });
           const payload = await resp.json();
           if (!resp.ok) {
@@ -584,11 +575,7 @@
       }
 
       document.getElementById("run").addEventListener("click", run);
-      // Ctrl/Cmd-Enter to run from inside the editor.
-      editor.setOption("extraKeys", {
-        "Ctrl-Enter": run,
-        "Cmd-Enter": run,
-      });
+      editor.setOption("extraKeys", { "Ctrl-Enter": run, "Cmd-Enter": run });
     </script>
   </body>
 </html>

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Timmy &mdash; Metadata corpus</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 2rem auto;
+        width: 90%;
+      }
+      h1 {
+        font-size: 1.3rem;
+      }
+      .callout {
+        margin-top: 1.5rem;
+        border: 1px solid #d8e2ee;
+        border-left: 4px solid #7aa7d8;
+        background: #f8fafd;
+        border-radius: 6px;
+        padding: 1.25rem 1.5rem;
+        max-width: 720px;
+      }
+      .callout p {
+        font-size: 0.9rem;
+        color: #444;
+        line-height: 1.5;
+      }
+      button.build {
+        margin-top: 0.5rem;
+        font-size: 0.95rem;
+        padding: 0.55rem 1.1rem;
+        background: #2c4a6e;
+        color: #fff;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+      }
+      button.build:hover {
+        background: #21384f;
+      }
+      .err {
+        margin-top: 1rem;
+        color: #b00020;
+        font-size: 0.85rem;
+        font-family: ui-monospace, monospace;
+      }
+    </style>
+  </head>
+  <body>
+    {% include "_nav.html" %}
+    <h1>TIMDEX metadata corpus</h1>
+
+    <div class="callout">
+      <p>
+        <strong>No corpus yet.</strong> The metadata corpus flattens the
+        transformed JSON of <em>every current record</em> into queryable
+        <code>(path, value)</code> rows &mdash; the basis for field coverage,
+        value distributions, and record drill-downs (over the whole dataset or any
+        subset).
+      </p>
+      <p>
+        Building reads every current record once, so it can take a few minutes.
+        You'll see live progress, and afterward an <strong>Update</strong> keeps it
+        current cheaply.
+      </p>
+      <form method="POST" action="{{ url_for('analysis.build') }}">
+        <button type="submit" class="build">Build the corpus</button>
+      </form>
+      {% if last_job and last_job.error %}
+      <p class="err">Last build failed: {{ last_job.error }}</p>
+      {% endif %}
+    </div>
+  </body>
+</html>

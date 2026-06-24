@@ -33,51 +33,58 @@ produces *no* eav row; a field that's present but empty produces a row with
 `value_type` `object-empty`/`array-empty`. "Coverage" means "how many records
 have at least one row under this path."
 
-## An analysis is an immutable file
+## One corpus, kept current
 
-An **analysis** is a self-contained, read-only `<analysis_id>.duckdb` file built
-from a filtered slice of records (e.g. "all current `dspace` records"). It holds
-`docs`, `eav`, and a self-describing `manifest`. Because it's just a file, it's
-portable, cheap to drop, and you can `ATTACH` two of them to compare.
+There is a single **corpus** -- one read-only `corpus.duckdb` flattening *every
+current record* into `docs` + `eav`. It isn't built per question; it's built once
+and then kept up to date:
 
-Building one reads the dataset and can take seconds to minutes depending on
-corpus size, so analyses are reused, not rebuilt per question.
+- `timmy analysis status` -- does the corpus exist, how big is it, when was it
+  last updated?
+- `timmy analysis build` -- (re)build it from all current records. Reads the
+  whole dataset once, so it can take minutes.
+- `timmy analysis update` -- reconcile it with the live dataset incrementally
+  (adds new/changed records, drops vanished ones). Cost scales with what changed,
+  not the corpus size -- cheap, run it freely.
 
-## Two surfaces: cheap metadata vs. analyses
+If `status` shows no corpus, build it before asking field-content questions.
 
-Not every question needs an analysis. There are two layers:
+## Subsets are scopes, not separate analyses
+
+To analyze a slice -- `source=dspace`, `run_date > '2026-01-01'` -- you don't
+build a new artifact; you **scope** a read command to that subset of the one
+corpus. Every read command takes scope flags:
+
+```sh
+timmy analysis fields --source dspace
+timmy analysis values --path subjects --source dspace
+timmy analysis query --where "run_date > '2026-01-01'" "select count(*) from docs"
+```
+
+No flags = the whole corpus. A scope is a live filter over the current corpus, so
+it's never stale and there's nothing to clean up.
+
+## Two surfaces: cheap metadata vs. the corpus
+
+Not every question needs the corpus. There are two layers:
 
 - **`timmy sources`** -- instant, metadata-only aggregates (record counts per
-  source, version/run history, dates). No payload reads, no artifact. This
-  answers "how many records", "what sources exist", "what runs happened".
-- **`timmy analysis ...`** -- the EAV model above, for questions about *field
+  source, version/run history, dates). No payload reads. This answers "how many
+  records", "what sources exist", "what runs happened".
+- **`timmy analysis ...`** -- the EAV corpus above, for questions about *field
   content* (coverage, vocabulary, outliers, comparisons).
 
-Reach for the cheap surface first; only build an analysis when the question is
-genuinely about what's *inside* the records.
-
-## The find-or-build pattern
-
-Most questions are answered against an analysis. The flow is explicit (no hidden
-rebuilds):
-
-1. `timmy analysis list [--source X] --json` -- is there a recent analysis to
-   reuse?
-2. if not, `timmy analysis build --source X --json` -- build one, get its id.
-3. answer the question with `analysis fields` / `values` / `records` / `query`.
-
-Prefer reusing a recent analysis; only build when none fits, or when the user
-wants fresh data. Tell the user when you build one (it has a cost) and that it
-persists until pruned.
+Reach for the cheap surface first; use the corpus when the question is genuinely
+about what's *inside* the records.
 
 ## You are expected to editorialize
 
 Many questions are open-ended ("how is `subjects` used?", "find outlier
 records", "how do these sources compare?"). Timmy gives you the data; the
 *interpretation* is your job. Ground every claim in a number or a record you
-pulled, name the analysis id you used, and say when something is judgement vs.
-measurement. If a question needs data that doesn't exist yet (e.g. no analysis
-for that source), say so and offer to build it rather than guessing.
+pulled, name the scope you used (e.g. `--source dspace`), and say when something
+is judgement vs. measurement. If the corpus doesn't exist yet, say so and offer
+to build it rather than guessing.
 
 ## Single records
 

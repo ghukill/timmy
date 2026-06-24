@@ -1,11 +1,23 @@
-"""Analysis subsystem: flatten transformed TIMDEX records into EAV rows.
+"""Analysis subsystem: the single, always-current metadata corpus.
 
-The first building block here is the recursive flattener (``flatten.py``), which
-turns a parsed transformed record into ``(path, path_indexed, value,
-value_type)`` rows. Later stages (build job, materialized DuckDB artifact,
-``/analysis`` blueprint) consume these rows.
+The flattener (``flatten.py``) turns a parsed transformed record into ``(path,
+path_indexed, value, value_type)`` rows. ``corpus.py`` materializes every current
+record's rows into one ``corpus.duckdb`` and keeps it current; ``scope.py`` narrows
+queries to a live subset; ``store.py`` holds the shared flatten/query layer both the
+corpus and the ``/analysis`` blueprint read through.
 """
 
+from timmy.analysis.corpus import (
+    CORPUS_FILENAME,
+    build_corpus,
+    corpus_exists,
+    corpus_path,
+    delete_corpus,
+    field_usage_report,
+    open_corpus,
+    read_corpus_meta,
+    update_corpus,
+)
 from timmy.analysis.flatten import (
     EAVRow,
     SAMPLE_RECORD,
@@ -13,37 +25,45 @@ from timmy.analysis.flatten import (
     flatten_record,
     make_timdex_composite_id,
 )
+from timmy.analysis.scope import (
+    EMPTY_SCOPE,
+    SCOPE_COLUMNS,
+    Scope,
+    make_scope,
+    scoped,
+)
 from timmy.analysis.store import (
-    ANALYSIS_ID_RE,
     OBJECT_IDENTITY_COLUMNS,
     OBJECT_RECORD_COLUMNS,
     PATH_RECORD_COLUMNS,
     PATH_VALUE_COLUMNS,
     VALUE_RECORD_COLUMNS,
-    build_analysis,
-    delete_analysis,
-    field_usage,
-    get_field_usage_report,
-    is_valid_analysis_id,
-    list_analyses,
-    new_analysis_id,
     object_columns,
     object_field_paths,
-    object_field_summaries,
     object_member_stats,
     object_record_shape,
     object_rows,
-    open_analysis,
     path_record_counts,
     path_values,
-    read_manifest,
     top_level_fields,
-    update_manifest,
     value_records,
 )
 
 __all__ = [
-    "ANALYSIS_ID_RE",
+    "CORPUS_FILENAME",
+    "EMPTY_SCOPE",
+    "SCOPE_COLUMNS",
+    "Scope",
+    "build_corpus",
+    "corpus_exists",
+    "corpus_path",
+    "delete_corpus",
+    "field_usage_report",
+    "make_scope",
+    "open_corpus",
+    "read_corpus_meta",
+    "scoped",
+    "update_corpus",
     "OBJECT_IDENTITY_COLUMNS",
     "OBJECT_RECORD_COLUMNS",
     "PATH_RECORD_COLUMNS",
@@ -51,27 +71,16 @@ __all__ = [
     "VALUE_RECORD_COLUMNS",
     "EAVRow",
     "SAMPLE_RECORD",
-    "build_analysis",
-    "delete_analysis",
-    "field_usage",
-    "get_field_usage_report",
     "flatten",
     "flatten_record",
-    "is_valid_analysis_id",
-    "list_analyses",
     "make_timdex_composite_id",
-    "new_analysis_id",
     "object_columns",
     "object_field_paths",
-    "object_field_summaries",
     "object_member_stats",
     "object_record_shape",
     "object_rows",
-    "open_analysis",
     "path_record_counts",
     "path_values",
-    "read_manifest",
     "top_level_fields",
-    "update_manifest",
     "value_records",
 ]

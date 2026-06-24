@@ -121,17 +121,17 @@ def register_shell_context(app: Flask) -> None:
                 )
             )
 
-        def build_analysis(**kwargs: Any) -> dict[str, Any]:
-            """Build an analysis DB from a filter (pre-bound to td + dir)."""
-            return analysis.build_analysis(td, analyses_dir, **kwargs)
+        def build_corpus(**kwargs: Any) -> dict[str, Any]:
+            """(Re)build the corpus from all current records (pre-bound to td + dir)."""
+            return analysis.build_corpus(td, analyses_dir, **kwargs)
 
-        def open_analysis(analysis_id: str, *, read_only: bool = True):
-            """Open an analysis DB by id (pre-bound to dir)."""
-            return analysis.open_analysis(analyses_dir, analysis_id, read_only=read_only)
+        def update_corpus(**kwargs: Any) -> dict[str, Any]:
+            """Reconcile the corpus against the live dataset (pre-bound to td + dir)."""
+            return analysis.update_corpus(td, analyses_dir, **kwargs)
 
-        def list_analyses() -> list[dict[str, Any]]:
-            """List built analyses, newest first (pre-bound to dir)."""
-            return analysis.list_analyses(analyses_dir)
+        def open_corpus(*, read_only: bool = True):
+            """Open the corpus DB (pre-bound to dir)."""
+            return analysis.open_corpus(analyses_dir, read_only=read_only)
 
         return {
             "td": td,
@@ -141,9 +141,10 @@ def register_shell_context(app: Flask) -> None:
             "SAMPLE_RECORD": analysis.SAMPLE_RECORD,
             "make_timdex_composite_id": analysis.make_timdex_composite_id,
             "sample_transformed": sample_transformed,
-            "build_analysis": build_analysis,
-            "open_analysis": open_analysis,
-            "list_analyses": list_analyses,
+            "build_corpus": build_corpus,
+            "update_corpus": update_corpus,
+            "open_corpus": open_corpus,
+            "read_corpus_meta": lambda: analysis.read_corpus_meta(analyses_dir),
         }
 
 

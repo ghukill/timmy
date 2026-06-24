@@ -30,14 +30,14 @@ import click
 # Narrative topics ship as packaged markdown; generated topics are computed
 # here. Order is the reading order presented to humans and agents alike.
 NARRATIVE_TOPICS: dict[str, str] = {
-    "overview": "Mental model: TIMDEX records, the EAV analysis model, find-or-build.",
+    "overview": "Mental model: TIMDEX records, the EAV corpus, scoping to subsets.",
     "playbooks": "Question -> command recipes for common agent tasks.",
     "sources": "Per-source notes: payload formats and known quirks.",
     "transmogrifier": "How source -> transformed works; reading the cloned transform code.",
 }
 GENERATED_TOPICS: dict[str, str] = {
     "commands": "Full command reference (generated from the live CLI).",
-    "schema": "Analysis DuckDB schema: docs / eav / manifest (generated).",
+    "schema": "Corpus DuckDB schema: docs / eav / corpus_meta (generated).",
 }
 
 
@@ -157,28 +157,31 @@ def render_catalog_markdown(catalog: list[dict[str, Any]]) -> str:
 # schema reference (derived from store/flatten constants)
 # --------------------------------------------------------------------------- #
 def render_schema_markdown() -> str:
-    """Render the analysis-DB schema doc from the live DDL + flatten semantics."""
-    from timmy.analysis.store import EXCLUDED_FIELDS, SCHEMA_SQL
+    """Render the corpus DuckDB schema doc from the live DDL + flatten semantics."""
+    from timmy.analysis.corpus import CORPUS_SCHEMA_SQL
+    from timmy.analysis.store import EXCLUDED_FIELDS
 
     excluded = ", ".join(f"`{f}`" for f in sorted(EXCLUDED_FIELDS)) or "(none)"
-    return f"""# Analysis DuckDB schema
+    return f"""# Corpus DuckDB schema
 
-Each analysis is one self-contained, read-only `<analysis_id>.duckdb` file with
-three tables. `timmy analysis query <id> "<sql>"` runs read-only SQL against
-them -- the universal escape hatch for anything the typed commands don't cover.
+There is one corpus -- a single read-only `corpus.duckdb` -- flattening *every
+current record* into queryable rows. `timmy analysis query "<sql>"` runs
+read-only SQL against it (add scope flags like `--source` to narrow to a subset);
+it's the universal escape hatch for anything the typed commands don't cover.
 
 ## Tables (authoritative DDL)
 
 ```sql
-{SCHEMA_SQL.strip()}
+{CORPUS_SCHEMA_SQL.strip()}
 ```
 
 ## How to read them
 
-- **`docs`** -- one row per analyzed record *version* (the dimension table).
+- **`docs`** -- one row per current record *version* (the dimension table).
   `timdex_composite_id` (`timdex_record_id|run_id|run_record_offset`) joins to
-  `eav`. A record version is uniquely `(timdex_record_id, run_id,
-  run_record_offset)`.
+  `eav`. The metadata columns (`source`, `run_date`, `run_type`, `action`,
+  `run_timestamp`) are what *scopes* filter on -- a subset is a predicate over
+  `docs`, applied at query time, not a separate file.
 - **`eav`** -- the flattened transformed payload, one row per JSON *leaf*:
   - `path` collapses array indices to `[]` (e.g. `contributors[].kind`) -- the
     GROUP BY key for corpus-wide field usage.
@@ -188,12 +191,25 @@ them -- the universal escape hatch for anything the typed commands don't cover.
     of: `string`, `number`, `boolean`, `null`, `object-empty`, `array-empty`.
     An empty object/array gets its own row, so "present but empty" stays
     distinguishable from absent (absent = no row for that path).
-- **`manifest`** -- a single self-describing row: how the analysis was built
-  (`where_predicate`, `filters_json`, `table_name`), `dataset_location`, counts
-  (`doc_count`, `eav_count`, `skipped_count`), and `created_at`.
+- **`corpus_meta`** -- a single self-describing row: `created_at`,
+  `last_updated_at`, `dataset_location`, and counts (`doc_count`, `eav_count`,
+  `skipped_count`, `source_record_count`).
+- **`scope_report_cache`** -- cached schema-overview reports, one per scope
+  (`scope_key` `''` is the whole corpus), keyed by `corpus_version` so an update
+  invalidates them. An implementation detail; you rarely query it directly.
 
 Provenance/bookkeeping fields are dropped before flattening and never appear in
 `eav`: {excluded}.
+
+## Scoping a query to a subset
+
+Scope flags add a temp view over `docs`/`eav` restricted to the subset, so the
+same SQL works against the whole corpus or any slice:
+
+```sh
+timmy analysis query --source dspace "select count(*) from docs"
+timmy analysis query --where "run_date > '2026-01-01'" "select count(*) from eav"
+```
 
 ## Worked patterns
 
@@ -249,9 +265,10 @@ description: >-
 
 # Timmy: TIMDEX metadata analysis
 
-`timmy` is a CLI for profiling TIMDEX records. Records are flattened into an
-entity-attribute-value (EAV) model and materialized as immutable, read-only
-DuckDB analysis files you can query. You drive it entirely from the shell.
+`timmy` is a CLI for profiling TIMDEX records. Every current record is flattened
+into an entity-attribute-value (EAV) model and held in one always-current
+**corpus** -- a read-only DuckDB file you query directly (whole, or scoped to a
+subset like `--source dspace`). You drive it entirely from the shell.
 
 Start with `reference/overview.md` for the mental model, then
 `reference/playbooks.md` for question -> command recipes. The CLI is the source
@@ -268,8 +285,8 @@ looks stale, prefer the live commands).
 - stdout is data, stderr is progress/errors; every read command takes `--json`.
 - Exit code 0 on success, non-zero on failure; nothing blocks on a prompt when
   you pass non-interactive flags (`--no-input`, `--yes`).
-- The escape hatch for anything bespoke: `timmy analysis query <id> "<sql>"`
-  against the documented `docs`/`eav`/`manifest` schema.
+- The escape hatch for anything bespoke: `timmy analysis query "<sql>"` (add
+  scope flags to narrow) against the documented `docs`/`eav`/`corpus_meta` schema.
 """
 
 

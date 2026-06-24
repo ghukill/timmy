@@ -149,24 +149,16 @@
     </details>
 
     <details class="analyses">
-      <summary>Analyses</summary>
+      <summary>Metadata analysis</summary>
       <p class="intro">
-        Build a new analysis from the <strong>current filter</strong>: Timmy
-        flattens the transformed JSON of every matching record into a queryable
-        DuckDB analysis. Runs synchronously &mdash; may take a while.
+        Open the <strong>metadata analysis corpus</strong> narrowed to the
+        current filter &mdash; field coverage, value distributions, and
+        drill-downs for exactly this subset. The corpus spans all records; this
+        just scopes the view (by <code>source</code>, <code>run_type</code>,
+        <code>action</code>, <code>run_id</code>, and your raw <code>where</code>).
       </p>
-      <div class="grid">
-        <label>
-          name <span class="warn">optional</span>
-          <input type="text" id="analysis_name" placeholder="e.g. alma-subjects" />
-        </label>
-        <label>
-          notes <span class="warn">optional</span>
-          <input type="text" id="analysis_notes" placeholder="what you're investigating" />
-        </label>
-      </div>
       <div class="actions">
-        <button type="button" id="run-analysis">Build TIMDEX Metadata Analysis</button>
+        <button type="button" id="view-analysis">View in metadata analysis &rarr;</button>
       </div>
     </details>
 
@@ -262,37 +254,20 @@
         table.ajax.reload();
       });
 
-      // Build an analysis from the CURRENT filter state. We POST the same
-      // inputs the table sends (typed filters, f_where, global search) so the
-      // analysis corpus matches exactly what's on screen, then let the browser
-      // navigate to the resulting /analysis/<id> page (POST-redirect-GET).
-      document.getElementById("run-analysis").addEventListener("click", () => {
-        const form = document.createElement("form");
-        form.method = "POST";
-        form.action = "{{ url_for('analysis.build') }}";
-
-        const add = (name, value) => {
-          const input = document.createElement("input");
-          input.type = "hidden";
-          input.name = name;
-          input.value = value;
-          form.appendChild(input);
-        };
-
-        FILTER_IDS.forEach((id) =>
-          add(id, document.getElementById(id).value.trim()),
-        );
-        add("f_where", whereEditor.getValue().trim());
-        add(
-          "f_all_versions",
-          document.getElementById("f_all_versions").checked ? "1" : "",
-        );
-        add("search[value]", table.search());
-        add("name", document.getElementById("analysis_name").value.trim());
-        add("notes", document.getElementById("analysis_notes").value.trim());
-
-        document.body.appendChild(form);
-        form.submit();
+      // Carry the CURRENT filter to the metadata-analysis corpus as a *scope*: the
+      // records filter columns map 1:1 to corpus scope params, so the analysis
+      // dashboard opens showing field usage/values for exactly this subset (no build).
+      document.getElementById("view-analysis").addEventListener("click", () => {
+        const params = new URLSearchParams();
+        ["f_source", "f_run_type", "f_action", "f_run_id"].forEach((id) => {
+          const v = document.getElementById(id).value.trim();
+          if (v) params.set(id, v);
+        });
+        const where = whereEditor.getValue().trim();
+        if (where) params.set("f_where", where);
+        const qs = params.toString();
+        window.location.href =
+          "{{ url_for('analysis.index') }}" + (qs ? "?" + qs : "");
       });
 
       // Pretty-print the raw SQL in place using sql-formatter.

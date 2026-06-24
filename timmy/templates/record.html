@@ -212,20 +212,19 @@
     <section>
       <h2>Flattened fields <span class="badge">{{ eav_rows|length }} rows</span></h2>
       {% if eav_rows %}
-      {% if analysis_ctx %}
+      {% if corpus_ctx %}
       <p class="context-note">
-        Flattened live from this record's transformed JSON. You arrived from
-        analysis
-        <a href="{{ url_for('analysis.detail', analysis_id=analysis_ctx.id) }}"><strong>{{ analysis_ctx.label }}</strong></a>,
-        so the field path and value links below explore within that analysis's
-        corpus.
+        Flattened live from this record's transformed JSON. Field-path and value
+        links below explore that field across the
+        <a href="{{ url_for('analysis.index', **corpus_ctx.scope_args) }}"><strong>corpus</strong></a>{% if corpus_ctx.scope_args %}
+        (within your current subset){% endif %}.
       </p>
       {% else %}
       <p class="context-note plain">
-        Flattened live from this record's transformed JSON. You didn't arrive
-        from an analysis, so field paths and values aren't clickable &mdash; open
-        a record from an analysis drill-down to explore its values across that
-        corpus.
+        Flattened live from this record's transformed JSON. No corpus is built
+        yet, so field paths and values aren't clickable &mdash;
+        <a href="{{ url_for('analysis.index') }}">build the corpus</a> to explore
+        values across all records.
       </p>
       {% endif %}
       <div class="flat-wrap">
@@ -240,10 +239,10 @@
             {% for row in eav_rows %}
             <tr>
               <td class="field-path">
-                {% if analysis_ctx %}
+                {% if corpus_ctx %}
                 <a
-                  href="{{ url_for('analysis.values', analysis_id=analysis_ctx.id, prefix=row.path) }}"
-                  title="Explore values at {{ row.path }} across {{ analysis_ctx.label }}"
+                  href="{{ url_for('analysis.values', prefix=row.path, **corpus_ctx.scope_args) }}"
+                  title="Explore values at {{ row.path }} across the corpus"
                   >{{ row.path_indexed | colorize_indices }}</a
                 >
                 {% else %}{{ row.path_indexed | colorize_indices }}{% endif %}
@@ -251,10 +250,10 @@
               <td class="value">
                 {% if row.value is none %}
                 <span class="flat-null">&mdash;</span>
-                {% elif analysis_ctx %}
+                {% elif corpus_ctx %}
                 <a
-                  href="{{ url_for('analysis.value_records_page', analysis_id=analysis_ctx.id, path=row.path, value=row.value) }}"
-                  title="Records where {{ row.path }} = this value in {{ analysis_ctx.label }}"
+                  href="{{ url_for('analysis.value_records_page', path=row.path, value=row.value, **corpus_ctx.scope_args) }}"
+                  title="Records where {{ row.path }} = this value in the corpus"
                   >{{ row.value }}</a
                 >
                 {% else %}{{ row.value }}{% endif %}

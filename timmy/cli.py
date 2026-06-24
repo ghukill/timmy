@@ -13,9 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import sys
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import click
@@ -26,7 +24,7 @@ from timmy.config import (
     load_config,
     resolve_config,
 )
-from timmy.filters import build_tda_filter, filter_label, split_csv
+from timmy.filters import split_csv
 from timmy.logging_setup import apply_log_level, normalize_level
 from timmy.output import emit_csv, emit_json, emit_record, emit_rows
 
@@ -203,96 +201,132 @@ def _analyses_dir(ctx: click.Context) -> str:
     return load_config(ctx.obj["overrides"])["analysis_dir"]
 
 
-def _open(ctx: click.Context, analysis_id: str):
-    """Open an analysis DB read-only, mapping bad-id/missing into clean CLI errors."""
-    from timmy.analysis import is_valid_analysis_id, open_analysis
+def _open_corpus(ctx: click.Context):
+    """Open the corpus read-only, erroring cleanly if it hasn't been built yet.
 
-    if not is_valid_analysis_id(analysis_id):
-        raise click.ClickException(f"Not a valid analysis id: {analysis_id!r}")
-    try:
-        return open_analysis(_analyses_dir(ctx), analysis_id)
-    except FileNotFoundError as exc:
-        raise click.ClickException(str(exc)) from exc
+    Also turns on stderr logging so any warnings emitted while serving a read (e.g. the
+    "computing the report for a large subset" heads-up) reach the user.
+    """
+    from timmy.analysis import corpus_exists, open_corpus
+
+    analyses_dir = _analyses_dir(ctx)
+    if not corpus_exists(analyses_dir):
+        raise click.ClickException("No corpus built yet. Run `timmy analysis build`.")
+    _configure_cli_logging(ctx)
+    return open_corpus(analyses_dir)
 
 
-def _manifest_matches_source(manifest: dict[str, Any], source: str) -> bool:
-    """True if an analysis was built for ``source`` (per filters_json, then label)."""
-    raw = manifest.get("filters_json")
-    if raw:
-        try:
-            src = json.loads(raw).get("source")
-        except (json.JSONDecodeError, AttributeError):
-            src = None
-        if isinstance(src, list) and source in src:
-            return True
-        if isinstance(src, str) and source == src:
-            return True
-    return source.lower() in (manifest.get("label") or "").lower()
+def scope_options(func):
+    """Add the corpus-subset scope flags to a read command.
+
+    A scope is a live filter over the corpus's ``docs`` (source/run_type/action/run_id
+    IN-lists, plus a raw ``--where`` over docs columns) -- the same subset the web app
+    offers, never a separate analysis. Empty flags = the whole corpus.
+    """
+    func = click.option(
+        "--where", "scope_where", default=None,
+        help="Scope: raw SQL predicate over docs (e.g. \"run_date > '2026-01-01'\").",
+    )(func)
+    func = click.option("--run-id", "run_ids", multiple=True, help="Scope to run_id(s).")(func)
+    func = click.option("--action", "actions", multiple=True, help="Scope to action(s).")(func)
+    func = click.option("--run-type", "run_types", multiple=True, help="Scope to run_type(s).")(func)
+    func = click.option("--source", "sources", multiple=True, help="Scope to source(s) (repeatable/CSV).")(func)
+    return func
+
+
+def _scope(sources, run_types, actions, run_ids, scope_where):
+    """Build a :class:`Scope` from the scope_options flags."""
+    from timmy.analysis import make_scope
+
+    filters: dict[str, list[str]] = {}
+    for col, values in (
+        ("source", sources),
+        ("run_type", run_types),
+        ("action", actions),
+        ("run_id", run_ids),
+    ):
+        collected = _flatten_csv(values)
+        if collected:
+            filters[col] = collected
+    return make_scope(filters, scope_where)
+
+
+def _cli_progress():
+    """A throttled on_progress callback: phase changes + periodic counts to stderr."""
+    state = {"phase": None, "n": 0}
+
+    def callback(phase: str, done: int, total: int | None) -> None:
+        if phase != state["phase"]:
+            state["phase"] = phase
+            state["n"] = 0
+            click.echo(f"  {phase}…{f' (of {total})' if total else ''}", err=True)
+        else:
+            state["n"] += 1
+            if total and state["n"] % 10 == 0:
+                click.echo(f"    {done}/{total}", err=True)
+
+    return callback
 
 
 @cli.group()
 def analysis() -> None:
-    """Inspect built analyses (read-only; agent-facing)."""
+    """The metadata corpus: build it, keep it current, and query it (read-only).
+
+    There is one corpus over all current records. Read commands query the whole thing
+    by default, or a live subset via scope flags (``--source``, ``--run-type``,
+    ``--where`` …) -- no per-analysis ids, no separate builds.
+    """
 
 
-@analysis.command("list")
-@click.option("--source", default=None, help="Only analyses built for this source.")
+@analysis.command("status")
 @json_option
 @click.pass_context
-def analysis_list(ctx: click.Context, source: str | None, as_json: bool) -> None:
-    """List built analyses, newest first."""
-    from timmy.analysis import list_analyses
+def analysis_status(ctx: click.Context, as_json: bool) -> None:
+    """Whether the corpus exists, plus its size and last-updated time."""
+    from timmy.analysis import corpus_exists, read_corpus_meta
 
-    manifests = list_analyses(_analyses_dir(ctx))
-    if source:
-        manifests = [m for m in manifests if _manifest_matches_source(m, source)]
-    emit_rows(
-        manifests,
-        as_json=as_json,
-        columns=["analysis_id", "created_at", "label", "doc_count", "eav_count", "name"],
-    )
-
-
-@analysis.command("show")
-@click.argument("analysis_id")
-@json_option
-@click.pass_context
-def analysis_show(ctx: click.Context, analysis_id: str, as_json: bool) -> None:
-    """Show one analysis manifest."""
-    from timmy.analysis import is_valid_analysis_id, read_manifest
-
-    if not is_valid_analysis_id(analysis_id):
-        raise click.ClickException(f"Not a valid analysis id: {analysis_id!r}")
-    try:
-        manifest = read_manifest(_analyses_dir(ctx), analysis_id)
-    except FileNotFoundError as exc:
-        raise click.ClickException(str(exc)) from exc
-    emit_record(manifest, as_json=as_json)
+    analyses_dir = _analyses_dir(ctx)
+    if not corpus_exists(analyses_dir):
+        click.echo("No corpus built yet. Run `timmy analysis build`.", err=True)
+        if as_json:
+            emit_json({"exists": False})
+        return
+    emit_record({"exists": True, **read_corpus_meta(analyses_dir)}, as_json=as_json)
 
 
 @analysis.command("fields")
-@click.argument("analysis_id")
+@scope_options
 @click.option("--field", default=None, help="Restrict to a single top-level field.")
 @json_option
 @click.pass_context
 def analysis_fields(
-    ctx: click.Context, analysis_id: str, field: str | None, as_json: bool
+    ctx: click.Context,
+    sources: tuple[str, ...],
+    run_types: tuple[str, ...],
+    actions: tuple[str, ...],
+    run_ids: tuple[str, ...],
+    scope_where: str | None,
+    field: str | None,
+    as_json: bool,
 ) -> None:
-    """Per-field coverage: type, coverage_pct, cardinality, distinct values."""
-    from timmy.analysis import get_field_usage_report, is_valid_analysis_id
+    """Per-field coverage over the corpus (or a scoped subset): type, coverage, cardinality.
 
-    if not is_valid_analysis_id(analysis_id):
-        raise click.ClickException(f"Not a valid analysis id: {analysis_id!r}")
-    try:
-        # Served from the build-time cache (computed + backfilled on first read
-        # for legacy DBs) so this stays instant at the multi-million-record scale.
-        rows = get_field_usage_report(_analyses_dir(ctx), analysis_id)
-    except FileNotFoundError as exc:
-        raise click.ClickException(str(exc)) from exc
+    Served from the per-scope report cache (the whole-corpus report is materialized at
+    build/update time; a subset computes once on first view, then is instant).
+    """
+    from timmy.analysis import corpus_exists, field_usage_report
+
+    analyses_dir = _analyses_dir(ctx)
+    if not corpus_exists(analyses_dir):
+        raise click.ClickException("No corpus built yet. Run `timmy analysis build`.")
+    # Surface the "computing report for a large subset" warning (logged by
+    # field_usage_report on an uncached, large scope) on stderr.
+    _configure_cli_logging(ctx)
+    rows = field_usage_report(analyses_dir, _scope(sources, run_types, actions, run_ids, scope_where))
     if field:
         rows = [r for r in rows if r["field"] == field]
         if not rows:
-            raise click.ClickException(f"No field {field!r} in analysis {analysis_id}.")
+            raise click.ClickException(f"No field {field!r} in the corpus.")
     emit_rows(
         rows,
         as_json=as_json,
@@ -304,7 +338,7 @@ def analysis_fields(
 
 
 @analysis.command("values")
-@click.argument("analysis_id")
+@scope_options
 @click.option("--path", required=True, help="Field/path prefix to read values under.")
 @click.option("--search", default="", help="Filter values containing this text.")
 @click.option("--limit", default=100, show_default=True, type=int)
@@ -313,21 +347,27 @@ def analysis_fields(
 @click.pass_context
 def analysis_values(
     ctx: click.Context,
-    analysis_id: str,
+    sources: tuple[str, ...],
+    run_types: tuple[str, ...],
+    actions: tuple[str, ...],
+    run_ids: tuple[str, ...],
+    scope_where: str | None,
     path: str,
     search: str,
     limit: int,
     offset: int,
     as_json: bool,
 ) -> None:
-    """Distinct values (with counts) under a path."""
-    from timmy.analysis import path_values
+    """Distinct values (with counts) under a path, over the corpus or a scoped subset."""
+    from timmy.analysis import path_values, scoped
 
-    conn = _open(ctx, analysis_id)
+    scope = _scope(sources, run_types, actions, run_ids, scope_where)
+    conn = _open_corpus(ctx)
     try:
-        total, filtered, rows = path_values(
-            conn, path, search=search, limit=limit, offset=offset
-        )
+        with scoped(conn, scope):
+            total, filtered, rows = path_values(
+                conn, path, search=search, limit=limit, offset=offset
+            )
     finally:
         conn.close()
     click.echo(f"{len(rows)} of {filtered} value(s) (path total {total})", err=True)
@@ -339,7 +379,7 @@ def analysis_values(
 
 
 @analysis.command("records")
-@click.argument("analysis_id")
+@scope_options
 @click.option("--path", required=True, help="Path the value lives at.")
 @click.option("--value", required=True, help="Value to find records for.")
 @click.option("--search", default="", help="Filter records by id/source text.")
@@ -349,7 +389,11 @@ def analysis_values(
 @click.pass_context
 def analysis_records(
     ctx: click.Context,
-    analysis_id: str,
+    sources: tuple[str, ...],
+    run_types: tuple[str, ...],
+    actions: tuple[str, ...],
+    run_ids: tuple[str, ...],
+    scope_where: str | None,
     path: str,
     value: str,
     search: str,
@@ -357,14 +401,16 @@ def analysis_records(
     offset: int,
     as_json: bool,
 ) -> None:
-    """Records carrying a given value at a given path."""
-    from timmy.analysis import value_records
+    """Records carrying a given value at a given path (corpus or scoped subset)."""
+    from timmy.analysis import scoped, value_records
 
-    conn = _open(ctx, analysis_id)
+    scope = _scope(sources, run_types, actions, run_ids, scope_where)
+    conn = _open_corpus(ctx)
     try:
-        total, filtered, rows = value_records(
-            conn, path, value, search=search, limit=limit, offset=offset
-        )
+        with scoped(conn, scope):
+            total, filtered, rows = value_records(
+                conn, path, value, search=search, limit=limit, offset=offset
+            )
     finally:
         conn.close()
     click.echo(f"{len(rows)} of {filtered} record(s) (total {total})", err=True)
@@ -376,27 +422,40 @@ def analysis_records(
 
 
 @analysis.command("query")
-@click.argument("analysis_id")
+@scope_options
 @click.argument("sql")
 @click.option("--csv", "as_csv", is_flag=True, help="Emit CSV instead of a table.")
 @json_option
 @click.pass_context
 def analysis_query(
-    ctx: click.Context, analysis_id: str, sql: str, as_csv: bool, as_json: bool
+    ctx: click.Context,
+    sources: tuple[str, ...],
+    run_types: tuple[str, ...],
+    actions: tuple[str, ...],
+    run_ids: tuple[str, ...],
+    scope_where: str | None,
+    sql: str,
+    as_csv: bool,
+    as_json: bool,
 ) -> None:
-    """Run read-only SQL against an analysis DB (docs/eav/manifest schema).
+    """Run read-only SQL against the corpus (docs/eav/corpus_meta schema).
 
     The connection is read-only, so the engine itself rejects any write -- the
-    universal escape hatch for anything the typed commands don't cover.
+    universal escape hatch for anything the typed commands don't cover. Scope flags, if
+    given, narrow the ``docs``/``eav`` the SQL sees to that subset.
     """
     if as_csv and as_json:
         raise click.ClickException("Choose either --csv or --json, not both.")
 
-    conn = _open(ctx, analysis_id)
+    from timmy.analysis import scoped
+
+    scope = _scope(sources, run_types, actions, run_ids, scope_where)
+    conn = _open_corpus(ctx)
     try:
-        cursor = conn.execute(sql)
-        columns = [d[0] for d in cursor.description] if cursor.description else []
-        fetched = cursor.fetchmany(MAX_QUERY_ROWS + 1)
+        with scoped(conn, scope):
+            cursor = conn.execute(sql)
+            columns = [d[0] for d in cursor.description] if cursor.description else []
+            fetched = cursor.fetchmany(MAX_QUERY_ROWS + 1)
     except Exception as exc:  # noqa: BLE001 -- report SQL errors as a clean CLI failure
         raise click.ClickException(str(exc)) from exc
     finally:
@@ -418,7 +477,7 @@ def analysis_query(
 
 
 # --------------------------------------------------------------------------- #
-# analysis build / delete / prune (write & manage surface)
+# analysis build / update / delete (corpus lifecycle)
 # --------------------------------------------------------------------------- #
 def _load_dataset(ctx: click.Context):
     """Load the TIMDEXDataset from resolved config (the expensive, once-per-run cost).
@@ -446,91 +505,75 @@ def _flatten_csv(values: tuple[str, ...]) -> list[str]:
 
 
 @analysis.command("build")
-@click.option("--source", "sources", multiple=True, help="Filter by source (repeatable/CSV).")
-@click.option("--run-type", "run_types", multiple=True, help="Filter by run_type.")
-@click.option("--action", "actions", multiple=True, help="Filter by action.")
-@click.option("--run-id", "run_ids", multiple=True, help="Filter by run_id.")
-@click.option("--run-date", default=None, help="Exact run date (YYYY-MM-DD).")
-@click.option("--where", default=None, help="Raw SQL predicate (trusted power tool).")
-@click.option("--limit", default=None, type=int, help="Cap how many records are read.")
-@click.option(
-    "--all-versions",
-    is_flag=True,
-    help="Read every record version (metadata.records), not just current ones.",
-)
-@click.option("--name", default=None, help="Human name for the analysis.")
-@click.option("--notes", default=None, help="Free-text notes stored in the manifest.")
+@click.option("--yes", is_flag=True, help="Rebuild without confirming if a corpus exists.")
 @json_option
 @click.pass_context
-def analysis_build(
-    ctx: click.Context,
-    sources: tuple[str, ...],
-    run_types: tuple[str, ...],
-    actions: tuple[str, ...],
-    run_ids: tuple[str, ...],
-    run_date: str | None,
-    where: str | None,
-    limit: int | None,
-    all_versions: bool,
-    name: str | None,
-    notes: str | None,
-    as_json: bool,
-) -> None:
-    """Build one analysis DB from records matching a filter (foreground).
+def analysis_build(ctx: click.Context, yes: bool, as_json: bool) -> None:
+    """Build (or rebuild) the corpus from all current records (foreground).
 
-    Progress and the build summary go to stderr; the manifest is the data, on
-    stdout. Filter semantics match the web build exactly (shared timmy.filters).
+    There are no filters: the corpus is the whole dataset. Subsets are a query-time
+    concern (see the scope flags on the read commands), not a separate build. Progress
+    goes to stderr; the corpus meta is the data, on stdout.
     """
-    from timmy.analysis import build_analysis
+    from timmy.analysis import build_corpus, corpus_exists
 
-    filters: dict[str, Any] = {}
-    for column, values in (
-        ("source", sources),
-        ("run_type", run_types),
-        ("action", actions),
-        ("run_id", run_ids),
+    analyses_dir = _analyses_dir(ctx)
+    if (
+        corpus_exists(analyses_dir)
+        and not yes
+        and not click.confirm("A corpus already exists. Rebuild from scratch?", default=False)
     ):
-        collected = _flatten_csv(values)
-        if collected:
-            filters[column] = collected
-    if run_date:
-        filters["run_date"] = run_date.strip()
-
-    where_combined, filters = build_tda_filter(filters, where=where)
-    label = filter_label(where_combined, filters, limit)
-    table = "records" if all_versions else "current_records"
+        click.echo("Aborted.", err=True)
+        raise SystemExit(1)
 
     _configure_cli_logging(ctx)
-    click.echo(f"Building analysis ({label})…", err=True)
+    click.echo("Building corpus from all current records…", err=True)
     td = _load_dataset(ctx)
     try:
-        manifest = build_analysis(
-            td,
-            _analyses_dir(ctx),
-            where=where_combined,
-            table=table,
-            limit=limit,
-            label=label,
-            name=name,
-            notes=notes,
-            **filters,
-        )
+        meta = build_corpus(td, analyses_dir, on_progress=_cli_progress())
     except Exception as exc:  # noqa: BLE001 -- surface build failures as a clean exit
-        raise click.ClickException(f"Analysis build failed: {exc}") from exc
+        raise click.ClickException(f"Corpus build failed: {exc}") from exc
 
     click.echo(
-        f"Built {manifest['analysis_id']}: {manifest['doc_count']} docs, "
-        f"{manifest['eav_count']} eav rows, {manifest['skipped_count']} skipped",
+        f"Built corpus: {meta['doc_count']} docs, {meta['eav_count']} eav rows, "
+        f"{meta['skipped_count']} skipped",
         err=True,
     )
-    if as_json:
-        emit_json(manifest)
-    else:
-        emit_record(manifest, as_json=False)
+    emit_record(meta, as_json=as_json)
+
+
+@analysis.command("update")
+@json_option
+@click.pass_context
+def analysis_update(ctx: click.Context, as_json: bool) -> None:
+    """Reconcile the corpus against the live dataset (incremental; foreground).
+
+    Reads only what changed: new/changed records are added, vanished ones removed, and
+    the schema-overview report is recomputed. Cost scales with the change, not the
+    corpus size.
+    """
+    from timmy.analysis import corpus_exists, update_corpus
+
+    analyses_dir = _analyses_dir(ctx)
+    if not corpus_exists(analyses_dir):
+        raise click.ClickException("No corpus to update. Run `timmy analysis build` first.")
+
+    _configure_cli_logging(ctx)
+    click.echo("Updating corpus…", err=True)
+    td = _load_dataset(ctx)
+    try:
+        meta = update_corpus(td, analyses_dir, on_progress=_cli_progress())
+    except Exception as exc:  # noqa: BLE001 -- surface update failures as a clean exit
+        raise click.ClickException(f"Corpus update failed: {exc}") from exc
+
+    click.echo(
+        f"Corpus now: {meta['doc_count']} docs, {meta['eav_count']} eav rows", err=True
+    )
+    emit_record(meta, as_json=as_json)
 
 
 def _configure_cli_logging(ctx: click.Context) -> None:
-    """Send logs (e.g. build_analysis's summary) to stderr for a CLI run.
+    """Send logs (e.g. build_corpus's summary) to stderr for a CLI run.
 
     The level comes from the resolved ``log_level`` config (default INFO), so a
     ``log_level = "DEBUG"`` in ~/.timmy/config.toml turns on DEBUG here and in TDA.
@@ -544,119 +587,20 @@ def _configure_cli_logging(ctx: click.Context) -> None:
 
 
 @analysis.command("delete")
-@click.argument("analysis_id")
 @click.option("--yes", is_flag=True, help="Delete without confirming.")
 @click.pass_context
-def analysis_delete(ctx: click.Context, analysis_id: str, yes: bool) -> None:
-    """Delete one analysis DB file."""
-    from timmy.analysis import delete_analysis, is_valid_analysis_id
-
-    if not is_valid_analysis_id(analysis_id):
-        raise click.ClickException(f"Not a valid analysis id: {analysis_id!r}")
-    if not yes and not click.confirm(f"Delete analysis {analysis_id}?", default=False):
-        click.echo("Aborted.", err=True)
-        raise SystemExit(1)
-    if not delete_analysis(_analyses_dir(ctx), analysis_id):
-        raise click.ClickException(f"No analysis {analysis_id} to delete.")
-    click.echo(f"Deleted {analysis_id}", err=True)
-
-
-_DURATION_RE = re.compile(r"^\s*(\d+)\s*([wdhms])\s*$")
-_DURATION_UNITS = {
-    "w": "weeks",
-    "d": "days",
-    "h": "hours",
-    "m": "minutes",
-    "s": "seconds",
-}
-
-
-def _parse_duration(text: str) -> timedelta:
-    """Parse a duration like ``30d``, ``2w``, ``12h`` into a timedelta."""
-    match = _DURATION_RE.match(text)
-    if not match:
-        raise click.ClickException(
-            f"Bad --older-than {text!r}; use e.g. 30d, 2w, 12h, 45m."
-        )
-    amount, unit = int(match.group(1)), match.group(2)
-    return timedelta(**{_DURATION_UNITS[unit]: amount})
-
-
-def _created_at_naive(manifest: dict[str, Any]) -> datetime | None:
-    """Manifest created_at as a naive (UTC) datetime, for cutoff comparison."""
-    created = manifest.get("created_at")
-    if not isinstance(created, datetime):
-        return None
-    return created.replace(tzinfo=None) if created.tzinfo else created
-
-
-@analysis.command("prune")
-@click.option("--older-than", default=None, help="Prune analyses older than e.g. 30d, 2w, 12h.")
-@click.option("--keep", default=None, type=int, help="Always keep the N newest in scope.")
-@click.option("--source", default=None, help="Limit pruning to analyses built for this source.")
-@click.option("--dry-run", is_flag=True, help="Show what would be pruned; delete nothing.")
-@click.option("--yes", is_flag=True, help="Prune without confirming.")
-@json_option
-@click.pass_context
-def analysis_prune(
-    ctx: click.Context,
-    older_than: str | None,
-    keep: int | None,
-    source: str | None,
-    dry_run: bool,
-    yes: bool,
-    as_json: bool,
-) -> None:
-    """Bulk-delete old analyses, selected by age / count / source.
-
-    ``--source`` scopes the candidate set; ``--older-than`` and ``--keep`` then
-    select within it (``--keep`` always protects the N newest). At least one of
-    the three is required -- prune never targets everything by default.
-    """
-    from timmy.analysis import delete_analysis, list_analyses
-
-    if older_than is None and keep is None and source is None:
-        raise click.ClickException(
-            "Refusing to prune everything; pass --older-than, --keep, or --source."
-        )
+def analysis_delete(ctx: click.Context, yes: bool) -> None:
+    """Delete the corpus DB file (a rebuild recreates it)."""
+    from timmy.analysis import corpus_exists, delete_corpus
 
     analyses_dir = _analyses_dir(ctx)
-    scope = list_analyses(analyses_dir)  # newest first
-    if source:
-        scope = [m for m in scope if _manifest_matches_source(m, source)]
-
-    protected = {m["analysis_id"] for m in scope[:keep]} if keep is not None else set()
-    if older_than:
-        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - _parse_duration(older_than)
-        aged = [m for m in scope if (c := _created_at_naive(m)) and c < cutoff]
-    else:
-        # --keep or --source alone: every in-scope analysis is a candidate, and
-        # the newest `keep` are protected below.
-        aged = scope
-    to_prune = [m for m in aged if m["analysis_id"] not in protected]
-
-    columns = ["analysis_id", "created_at", "label", "doc_count"]
-    if not to_prune:
-        click.echo("Nothing to prune.", err=True)
-        if as_json:
-            emit_json([])
-        return
-
-    if dry_run:
-        click.echo(f"Would prune {len(to_prune)} analysis file(s) (dry run):", err=True)
-        emit_rows(to_prune, as_json=as_json, columns=columns)
-        return
-
-    if not yes and not click.confirm(
-        f"Delete {len(to_prune)} analysis file(s)?", default=False
-    ):
+    if not corpus_exists(analyses_dir):
+        raise click.ClickException("No corpus to delete.")
+    if not yes and not click.confirm("Delete the corpus?", default=False):
         click.echo("Aborted.", err=True)
         raise SystemExit(1)
-
-    for manifest in to_prune:
-        delete_analysis(analyses_dir, manifest["analysis_id"])
-    click.echo(f"Pruned {len(to_prune)} analysis file(s).", err=True)
-    emit_rows(to_prune, as_json=as_json, columns=columns)
+    delete_corpus(analyses_dir)
+    click.echo("Deleted corpus.", err=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -878,12 +822,16 @@ def docs_catalog(as_json: bool) -> None:
 @docs.command("schema")
 @json_option
 def docs_schema(as_json: bool) -> None:
-    """The analysis-DB schema (docs/eav/manifest), generated from the code."""
-    from timmy.analysis.store import EXCLUDED_FIELDS, SCHEMA_SQL
+    """The corpus DuckDB schema (docs/eav/corpus_meta), generated from the code."""
+    from timmy.analysis.corpus import CORPUS_SCHEMA_SQL
+    from timmy.analysis.store import EXCLUDED_FIELDS
     from timmy.docsgen import render_schema_markdown
 
     if as_json:
-        emit_json({"schema_sql": SCHEMA_SQL.strip(), "excluded_fields": sorted(EXCLUDED_FIELDS)})
+        emit_json({
+            "schema_sql": CORPUS_SCHEMA_SQL.strip(),
+            "excluded_fields": sorted(EXCLUDED_FIELDS),
+        })
         return
     click.echo(render_schema_markdown())
 

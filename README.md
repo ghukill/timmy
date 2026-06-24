@@ -67,8 +67,8 @@ The CLI is grouped by area. The headline commands:
 |---|---|
 | `timmy init` / `timmy config …` | Set up and inspect configuration. |
 | `timmy webapp run` | Run the web app (see below). |
-| `timmy sources …` | Per-source metadata: record counts, ETL run history. Cheap, metadata-only — no analysis needed. |
-| `timmy analysis …` | Build and query **metadata analyses** (records flattened into a queryable DuckDB file) for field coverage, vocabulary, outliers, etc. |
+| `timmy sources …` | Per-source metadata: record counts, ETL run history. Cheap, metadata-only — no corpus needed. |
+| `timmy analysis …` | Build/update and query the **metadata corpus** (every current record flattened into one queryable DuckDB file) for field coverage, vocabulary, outliers, etc. Query the whole corpus or any subset via scope flags (`--source`, `--where`, …). |
 | `timmy record …` | Inspect a single record version: metadata plus its raw source and transformed payloads. |
 | `timmy transmog …` | Clone/manage a local checkout of [Transmogrifier](https://github.com/MITLibraries/transmogrifier) (the source→transformed engine) so the actual transform code is on hand to interrogate. |
 | `timmy docs …` | Read Timmy’s own documentation, or install it as an agent skill. |
@@ -95,8 +95,9 @@ It’s a development server (not for production). Once it’s up, poke around:
 - **Records** — browse and filter the corpus; open any record to see its source
   vs. transformed payloads (and diff versions).
 - **Sources** — every source with its record count and full ETL run history.
-- **Analyses** — build a metadata analysis over a filtered slice of records,
-  then drill into field usage, distinct values, and per-record shape.
+- **Analysis** — the metadata corpus: build it (with live progress) and keep it
+  current, then drill into field usage, distinct values, and per-record shape —
+  for the whole corpus or a scoped subset.
 
 ## AI / agent use
 

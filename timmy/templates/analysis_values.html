@@ -62,10 +62,9 @@
   <body>
     {% include "_nav.html" %}
     <p>
-      <a class="back" href="{{ url_for('analysis.detail', analysis_id=analysis_id) }}">&larr; Back to analysis</a>
-      &nbsp;&middot;&nbsp;
-      <a class="back" href="{{ url_for('analysis.index') }}">All analyses</a>
+      <a class="back" href="{{ url_for('analysis.index', **scope_args) }}">&larr; Back to corpus{{ " (subset)" if scope_args }}</a>
     </p>
+    {% include "_scope_banner.html" %}
     <h1>Values under <code>{{ prefix or "(all paths)" }}</code></h1>
     <p class="lead">
       Distinct values for every path in scope. <code>documents</code> = records
@@ -82,7 +81,7 @@
     <p>
       <a
         class="objlink"
-        href="{{ url_for('analysis.object_page', analysis_id=analysis_id, path=prefix) }}"
+        href="{{ url_for('analysis.object_page', path=prefix, **scope_args) }}"
         >view all <code>{{ object_prefix }}</code> objects (unfiltered)</a
       >
     </p>
@@ -120,15 +119,16 @@
     <script>
       const PREFIX = {{ prefix | tojson }};
       const RECORD_COUNT_PATH = {{ record_count_path | tojson }};
-      const RECORDS_DRILL =
-        "{{ url_for('analysis.value_records_page', analysis_id=analysis_id) }}";
-      const OBJECT_DRILL =
-        "{{ url_for('analysis.object_page', analysis_id=analysis_id) }}";
+      const RECORDS_DRILL = "{{ url_for('analysis.value_records_page') }}";
+      const OBJECT_DRILL = "{{ url_for('analysis.object_page') }}";
       // Base for record links: /record/<id>/<run_id>/<offset> (exact version).
       const RECORD_BASE =
         "{{ url_for('main.records') }}".replace(/records$/, "record/");
       // Paths whose parent is a complex (object) field -> offer an object drill.
       const OBJECT_PATHS = new Set({{ object_paths | tojson }});
+      // Active corpus subset, carried through every drill/record link.
+      const SCOPE = {{ scope_args | tojson }};
+      const SCOPE_QS = {{ scope_qs | tojson }};
 
       function recordHref(id, runId, offset) {
         return (
@@ -138,7 +138,7 @@
           encodeURIComponent(runId) +
           "/" +
           encodeURIComponent(offset) +
-          "?analysis={{ analysis_id }}"
+          (SCOPE_QS ? "?" + SCOPE_QS : "")
         );
       }
 
@@ -148,7 +148,8 @@
           "?path=" +
           encodeURIComponent(path) +
           "&value=" +
-          encodeURIComponent(value)
+          encodeURIComponent(value) +
+          (SCOPE_QS ? "&" + SCOPE_QS : "")
         );
       }
 
@@ -156,9 +157,10 @@
         serverSide: true,
         processing: true,
         ajax: {
-          url: "{{ url_for('analysis.values_data', analysis_id=analysis_id) }}",
+          url: "{{ url_for('analysis.values_data') }}",
           data: function (d) {
             d.prefix = PREFIX;
+            Object.assign(d, SCOPE);
           },
         },
         orderMulti: false,
@@ -204,9 +206,10 @@
           serverSide: true,
           processing: true,
           ajax: {
-            url: "{{ url_for('analysis.values_records_data', analysis_id=analysis_id) }}",
+            url: "{{ url_for('analysis.values_records_data') }}",
             data: function (d) {
               d.path = RECORD_COUNT_PATH;
+              Object.assign(d, SCOPE);
             },
           },
           orderMulti: false,

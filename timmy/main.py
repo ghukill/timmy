@@ -291,29 +291,25 @@ def record_versions(timdex_record_id: str) -> str:
     )
 
 
-def _resolve_analysis_context(analysis_id: str | None) -> dict | None:
-    """Validate an ``?analysis=<id>`` param and return its display context.
+def _corpus_link_context() -> dict | None:
+    """Context for linking a record's EAV leaves into the corpus drills, or ``None``.
 
-    The EAV table's path/value links only make sense relative to a corpus, so a
-    record drilled into *from* an analysis carries that id forward. Returns
-    ``{"id", "label"}`` for a real analysis, or ``None`` when the param is
-    absent, malformed, or names an analysis that no longer exists -- in which
-    case the table renders its leaves as plain (unlinked) text.
+    The flattened-fields table's path/value links only make sense against a corpus. When
+    one exists, its leaves link into ``/analysis/values`` and ``/analysis/records``,
+    carrying forward any scope (``f_source``/``f_where``/…) the record was reached under
+    so the drill stays within the same subset. ``None`` when no corpus is built yet, in
+    which case the leaves render as plain (unlinked) text.
     """
-    if not analysis_id:
-        return None
     from timmy import analysis
 
-    if not analysis.is_valid_analysis_id(analysis_id):
+    if not analysis.corpus_exists(current_app.config["TIMDEX_ANALYSIS_DIR"]):
         return None
-    try:
-        manifest = analysis.read_manifest(
-            current_app.config["TIMDEX_ANALYSIS_DIR"], analysis_id
-        )
-    except FileNotFoundError:
-        return None
-    label = manifest.get("name") or manifest.get("label") or analysis_id
-    return {"id": analysis_id, "label": label}
+    scope_args = {
+        arg: val
+        for arg in ("f_source", "f_run_type", "f_action", "f_run_id", "f_where")
+        if (val := (request.args.get(arg) or "").strip())
+    }
+    return {"scope_args": scope_args}
 
 
 def _render_record_detail(
@@ -341,7 +337,7 @@ def _render_record_detail(
         source_pretty=prettify(rec.get("source_record"), source_format),
         transformed_pretty=prettify(rec.get("transformed_record"), "json"),
         eav_rows=flatten_transformed(rec.get("transformed_record")),
-        analysis_ctx=_resolve_analysis_context(request.args.get("analysis")),
+        corpus_ctx=_corpus_link_context(),
     )
 
 

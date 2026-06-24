@@ -1,15 +1,23 @@
-"""Web layer for the analysis subsystem (the ``/analysis`` blueprint).
+"""Web layer for the single analysis corpus (the ``/analysis`` blueprint).
 
-This module is the Flask surface over :mod:`timmy.analysis`, kept separate so the
-analysis package itself stays free of Flask and reusable from a CLI/agent later.
+This is the Flask surface over :mod:`timmy.analysis`, kept separate so the analysis
+package itself stays Flask-free and reusable from the CLI. There is **one** corpus over
+all current records -- no per-analysis ids or registry. Read views query the whole
+corpus by default, or a live *subset* via scope params (``f_source``, ``f_run_type``,
+``f_action``, ``f_run_id``, ``f_where``) carried through every drill link.
 
 Routes:
 
-- ``GET  /analysis/``               registry of built analyses
-- ``POST /analysis/build``          build one from the current /records filter,
-  then redirect to its detail page (synchronous; holds ``dataset_lock``)
-- ``GET  /analysis/<id>``           manifest + SQL console + (stubbed) report
-- ``POST /analysis/<id>/query``     run read-only SQL, return JSON results
+- ``GET  /analysis/``             corpus dashboard (or the "not built yet" empty state)
+- ``POST /analysis/build``        (re)build the whole corpus -- runs in a background job
+- ``POST /analysis/update``       reconcile against the live dataset -- background job
+- ``POST /analysis/delete``       delete the corpus file
+- ``GET  /analysis/job``          progress page for a running build/update
+- ``GET  /analysis/job.json``     progress snapshot (polled by the progress page)
+- ``POST /analysis/query``        run read-only SQL (scoped to the subset if given)
+- ``GET  /analysis/values``       path-scoped value table  (+ ``/values/data``)
+- ``GET  /analysis/object``       parent-object drill       (+ ``/object/data``)
+- ``GET  /analysis/records``      value -> records drill    (+ ``/records/data``)
 """
 
 from __future__ import annotations
@@ -17,6 +25,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
+from urllib.parse import urlencode
 
 from flask import (
     Blueprint,
@@ -30,14 +39,10 @@ from flask import (
 )
 
 from timmy import analysis
+from timmy.analysis.corpus import REPORT_WARN_THRESHOLD
+from timmy.corpus_job import corpus_job
 from timmy.dataset import dataset_lock, get_app_dataset
-from timmy.filters import (
-    IN_FILTER_COLUMNS,
-    build_tda_filter,
-    filter_label,
-    split_csv,
-)
-from timmy.main import _all_versions, _record_limit
+from timmy.filters import split_csv
 
 analysis_bp = Blueprint("analysis", __name__, url_prefix="/analysis")
 
@@ -47,22 +52,67 @@ MAX_QUERY_ROWS = 1000
 # Max rows per page for the server-side drill-down tables.
 MAX_PAGE = 200
 
+# Request-arg name -> docs scope column, for the corpus-subset filter shared by the
+# dashboard, the drills, and the SQL console.
+SCOPE_ARGS = {
+    "f_source": "source",
+    "f_run_type": "run_type",
+    "f_action": "action",
+    "f_run_id": "run_id",
+}
+
 
 def _analyses_dir() -> str:
     return current_app.config["TIMDEX_ANALYSIS_DIR"]
 
 
-def _check_analysis_id(analysis_id: str) -> None:
-    """404 unless the id matches our generated format (also blocks traversal)."""
-    if not analysis.is_valid_analysis_id(analysis_id):
-        abort(404)
+def _scope_from_request(values) -> analysis.Scope:
+    """Build a :class:`Scope` from the scope params on a request (args or JSON body)."""
+    filters: dict[str, list[str]] = {}
+    for arg, col in SCOPE_ARGS.items():
+        vals = split_csv(values.get(arg, "") or "")
+        if vals:
+            filters[col] = vals
+    where = (values.get("f_where", "") or "").strip() or None
+    return analysis.make_scope(filters, where)
+
+
+def _scope_args(values) -> dict[str, str]:
+    """The subset of request args that encode the scope, for carrying through links."""
+    out: dict[str, str] = {}
+    for arg in (*SCOPE_ARGS, "f_where"):
+        val = (values.get(arg, "") or "").strip()
+        if val:
+            out[arg] = val
+    return out
+
+
+def _open():
+    """Open the corpus read-only, 404 if it hasn't been built."""
+    analyses_dir = _analyses_dir()
+    if not analysis.corpus_exists(analyses_dir):
+        abort(404, description="No corpus built yet.")
+    return analysis.open_corpus(analyses_dir)
+
+
+def _scoped_doc_total(scope: analysis.Scope) -> int:
+    """Doc count under a scope (the coverage denominator). Cheap: indexed count."""
+    analyses_dir = _analyses_dir()
+    if scope.is_empty():
+        return analysis.read_corpus_meta(analyses_dir).get("doc_count") or 0
+    conn = analysis.open_corpus(analyses_dir)
+    try:
+        with analysis.scoped(conn, scope):
+            return conn.execute("select count(*) from docs").fetchone()[0]
+    finally:
+        conn.close()
 
 
 def _dt_params(args, columns: list[str]) -> tuple[int, int, int, str, str, str]:
     """Parse the DataTables server-side request into a tidy tuple.
 
-    Returns (draw, start, length, search, order_col, order_dir). The order
-    column is resolved from a whitelist so it is never user-controlled SQL.
+    Returns (draw, start, length, search, order_col, order_dir). The order column is
+    resolved from a whitelist so it is never user-controlled SQL.
     """
     draw = args.get("draw", default=1, type=int)
     start = max(args.get("start", default=0, type=int), 0)
@@ -72,27 +122,6 @@ def _dt_params(args, columns: list[str]) -> tuple[int, int, int, str, str, str]:
     order_col = columns[idx] if 0 <= idx < len(columns) else columns[0]
     order_dir = "desc" if args.get("order[0][dir]") == "desc" else "asc"
     return draw, start, length, search, order_col, order_dir
-
-
-def _tda_filter_from_request(values) -> tuple[str | None, dict[str, Any]]:
-    """Extract the /records filter inputs from a request, then defer to the
-    Flask-free :func:`timmy.filters.build_tda_filter` so the web build and the
-    CLI build (``timmy analysis build``) produce identical filters.
-    """
-    filters: dict[str, Any] = {}
-    for column in IN_FILTER_COLUMNS:
-        items = split_csv(values.get(f"f_{column}", "") or "")
-        if items:
-            filters[column] = items
-    run_date = (values.get("f_run_date", "") or "").strip()
-    if run_date:
-        filters["run_date"] = run_date
-
-    return build_tda_filter(
-        filters,
-        search=values.get("search[value]", "") or "",
-        where=values.get("f_where", "") or "",
-    )
 
 
 def _jsonable(value: Any) -> Any:
@@ -106,112 +135,144 @@ def _jsonable(value: Any) -> Any:
     return str(value)
 
 
+# --------------------------------------------------------------------------- #
+# Dashboard + lifecycle (build / update / delete / progress)
+# --------------------------------------------------------------------------- #
 @analysis_bp.get("/")
 def index() -> str:
-    """Registry of built analyses, newest first."""
-    return render_template("analysis_index.html", analyses=analysis.list_analyses(_analyses_dir()))
+    """Corpus dashboard: meta, the (scoped) schema overview, and the SQL console.
 
-
-@analysis_bp.post("/build")
-def build():
-    """Build an analysis from the current /records filter, then redirect to it.
-
-    Synchronous by design (v1): the read path uses the shared dataset
-    connection, so the build runs under ``dataset_lock``.
+    Redirects to the progress page while a build/update runs, and shows an empty state
+    with a Build button when no corpus exists yet.
     """
-    where, filters = _tda_filter_from_request(request.values)
-    limit = _record_limit(request.values)
-    # Match the browse: an analysis built from an all-versions browse reads every
-    # version (metadata.records), not just current ones.
-    table = "records" if _all_versions(request.values) else "current_records"
-    label = filter_label(where, filters, limit)
-    name = request.values.get("name", default="", type=str).strip() or None
-    notes = request.values.get("notes", default="", type=str).strip() or None
-    try:
-        with dataset_lock:
-            manifest = analysis.build_analysis(
-                get_app_dataset(),
-                _analyses_dir(),
-                where=where,
-                table=table,
-                limit=limit,
-                label=label,
-                name=name,
-                notes=notes,
-                **filters,
-            )
-    except Exception as exc:  # noqa: BLE001 -- surface build failures to the user
-        abort(400, description=f"Analysis build failed: {exc}")
-    return redirect(url_for("analysis.detail", analysis_id=manifest["analysis_id"]))
+    if corpus_job.is_running():
+        return redirect(url_for("analysis.job_page"))
 
+    analyses_dir = _analyses_dir()
+    if not analysis.corpus_exists(analyses_dir):
+        return render_template("analysis_empty.html", last_job=corpus_job.snapshot())
 
-@analysis_bp.post("/<analysis_id>/update")
-def update(analysis_id: str):
-    """Persist an edited name/notes onto the analysis, then return to it."""
-    _check_analysis_id(analysis_id)
-    name = request.form.get("name", default="", type=str).strip() or None
-    notes = request.form.get("notes", default="", type=str).strip() or None
-    try:
-        analysis.update_manifest(_analyses_dir(), analysis_id, name=name, notes=notes)
-    except FileNotFoundError:
-        abort(404)
-    return redirect(url_for("analysis.detail", analysis_id=analysis_id))
+    scope = _scope_from_request(request.args)
+    scope_args = _scope_args(request.args)
+    meta = analysis.read_corpus_meta(analyses_dir)
+    # The schema overview (the one expensive part) is NOT computed here -- the page
+    # loads instantly and fetches it asynchronously from `report_fragment`, so a large
+    # subset's first (uncached) report computes behind a spinner instead of hanging the
+    # whole page. Everything else on the dashboard is cheap.
+    doc_total = _scoped_doc_total(scope)
 
-
-@analysis_bp.post("/<analysis_id>/delete")
-def delete(analysis_id: str):
-    """Delete an analysis (its single DuckDB file), then return to the registry."""
-    _check_analysis_id(analysis_id)
-    analysis.delete_analysis(_analyses_dir(), analysis_id)
-    return redirect(url_for("analysis.index"))
-
-
-@analysis_bp.get("/<analysis_id>")
-def detail(analysis_id: str) -> str:
-    """Analysis home: manifest, SQL console, and the schema-overview report."""
-    _check_analysis_id(analysis_id)
-    try:
-        manifest = analysis.read_manifest(_analyses_dir(), analysis_id)
-        # One row per top-level field, typed (string / array[string] / object /
-        # array[object]); complex fields drill into the object view, scalar fields
-        # into the values view. Member/leaf detail lives in the drill, not here.
-        # Served from the cache materialized at build time (a full eav scan at the
-        # 5m-record scale); legacy DBs are computed + backfilled on first view.
-        report = analysis.get_field_usage_report(_analyses_dir(), analysis_id)
-    except FileNotFoundError:
-        abort(404)
     return render_template(
         "analysis_detail.html",
-        analysis_id=analysis_id,
-        manifest=manifest,
-        report=report,
+        meta=meta,
+        doc_total=doc_total,
+        report_may_be_slow=doc_total >= REPORT_WARN_THRESHOLD,
+        scope_args=scope_args,
+        scope_qs=urlencode(scope_args),
+        scoped=bool(scope_args),
         max_rows=MAX_QUERY_ROWS,
     )
 
 
-@analysis_bp.post("/<analysis_id>/query")
-def query(analysis_id: str):
-    """Run read-only SQL against the analysis DB; return JSON {columns, rows}.
+@analysis_bp.get("/report")
+def report_fragment() -> str:
+    """The schema-overview table as an HTML fragment, for the current scope.
 
-    The connection is opened read-only, so the engine itself rejects any write;
-    no SQL sanitizing is needed. This path never touches ``dataset_lock`` -- each
-    request gets its own connection to the standalone analysis file -- so the
-    console stays fully concurrent with browsing.
+    The dashboard fetches this asynchronously. Computing the report is the only slow
+    part of the page (an uncached report over a large subset is a multi-minute scan),
+    so isolating it here keeps the dashboard itself instant. Reuses the same Jinja table
+    partial the dashboard would have rendered inline, so drill links/coverage bars stay
+    identical and scope-aware.
     """
-    _check_analysis_id(analysis_id)
+    analyses_dir = _analyses_dir()
+    if not analysis.corpus_exists(analyses_dir):
+        abort(404, description="No corpus built yet.")
+    scope = _scope_from_request(request.args)
+    scope_args = _scope_args(request.args)
+    report = analysis.field_usage_report(analyses_dir, scope)
+    return render_template(
+        "_report_table.html",
+        report=report,
+        doc_total=_scoped_doc_total(scope),
+        scoped=bool(scope_args),
+        scope_args=scope_args,
+    )
+
+
+def _run_with_lock(fn, dataset, analyses_dir):
+    """Wrap a corpus build/update so it holds ``dataset_lock`` around the TDA reads."""
+
+    def runner(on_progress):
+        with dataset_lock:
+            return fn(dataset, analyses_dir, on_progress=on_progress)
+
+    return runner
+
+
+@analysis_bp.post("/build")
+def build():
+    """Kick off a (re)build of the whole corpus in the background, then show progress."""
+    dataset = get_app_dataset()
+    runner = _run_with_lock(analysis.build_corpus, dataset, _analyses_dir())
+    try:
+        corpus_job.start("build", runner)
+    except RuntimeError:
+        pass  # one already running -- just fall through to its progress page
+    return redirect(url_for("analysis.job_page"))
+
+
+@analysis_bp.post("/update")
+def update():
+    """Kick off an incremental reconcile in the background, then show progress."""
+    if not analysis.corpus_exists(_analyses_dir()):
+        abort(404, description="No corpus to update.")
+    dataset = get_app_dataset()
+    runner = _run_with_lock(analysis.update_corpus, dataset, _analyses_dir())
+    try:
+        corpus_job.start("update", runner)
+    except RuntimeError:
+        pass
+    return redirect(url_for("analysis.job_page"))
+
+
+@analysis_bp.post("/delete")
+def delete():
+    """Delete the corpus file, then return to the (now empty-state) dashboard."""
+    analysis.delete_corpus(_analyses_dir())
+    return redirect(url_for("analysis.index"))
+
+
+@analysis_bp.get("/job")
+def job_page() -> str:
+    """Progress page for the running (or just-finished) build/update."""
+    return render_template("analysis_job.html")
+
+
+@analysis_bp.get("/job.json")
+def job_json():
+    """Progress snapshot, polled by the progress page."""
+    return jsonify(corpus_job.snapshot())
+
+
+@analysis_bp.post("/query")
+def query():
+    """Run read-only SQL against the corpus; return JSON {columns, rows}.
+
+    The connection is opened read-only, so the engine itself rejects any write -- no SQL
+    sanitizing needed. Scope params in the body narrow the ``docs``/``eav`` the SQL sees
+    to that subset (via temp views shadowing the base tables).
+    """
     payload = request.get_json(silent=True) or {}
     sql = (payload.get("sql") or "").strip()
     if not sql:
         return jsonify(error="No SQL provided."), 400
 
+    scope = _scope_from_request(payload)
+    conn = _open()
     try:
-        conn = analysis.open_analysis(_analyses_dir(), analysis_id, read_only=True)
-    except FileNotFoundError:
-        abort(404)
-    try:
-        cursor = conn.execute(sql)
-        columns = [d[0] for d in cursor.description] if cursor.description else []
-        rows = cursor.fetchmany(MAX_QUERY_ROWS + 1)
+        with analysis.scoped(conn, scope):
+            cursor = conn.execute(sql)
+            columns = [d[0] for d in cursor.description] if cursor.description else []
+            rows = cursor.fetchmany(MAX_QUERY_ROWS + 1)
         truncated = len(rows) > MAX_QUERY_ROWS
         data = [[_jsonable(v) for v in row] for row in rows[:MAX_QUERY_ROWS]]
         return jsonify(
@@ -223,23 +284,24 @@ def query(analysis_id: str):
         conn.close()
 
 
-def _table_data(analysis_id: str, columns: list[str], runner):
+# --------------------------------------------------------------------------- #
+# Drill-down tables (all scope-aware)
+# --------------------------------------------------------------------------- #
+def _table_data(columns: list[str], runner):
     """Shared server-side DataTables responder for the drill-down tables.
 
     ``runner(conn, search, order_col, order_dir, limit, offset)`` returns
-    ``(total, filtered, rows)``; this handles param parsing, the read-only
-    connection, and the DataTables JSON envelope.
+    ``(total, filtered, rows)``; this handles param parsing, the read-only connection,
+    the active scope (temp views shadowing docs/eav), and the DataTables JSON envelope.
     """
-    _check_analysis_id(analysis_id)
     draw, start, length, search, order_col, order_dir = _dt_params(request.args, columns)
+    scope = _scope_from_request(request.args)
+    conn = _open()
     try:
-        conn = analysis.open_analysis(_analyses_dir(), analysis_id, read_only=True)
-    except FileNotFoundError:
-        abort(404)
-    try:
-        total, filtered, rows = runner(
-            conn, search, order_col, order_dir, length, start
-        )
+        with analysis.scoped(conn, scope):
+            total, filtered, rows = runner(
+                conn, search, order_col, order_dir, length, start
+            )
     except Exception as exc:  # noqa: BLE001 -- surfaced inline by DataTables
         return jsonify(draw=draw, error=str(exc))
     finally:
@@ -249,52 +311,48 @@ def _table_data(analysis_id: str, columns: list[str], runner):
     )
 
 
-@analysis_bp.get("/<analysis_id>/values")
-def values(analysis_id: str) -> str:
+@analysis_bp.get("/values")
+def values() -> str:
     """Path-scoped value table: distinct values for every path under a prefix."""
-    _check_analysis_id(analysis_id)
     prefix = request.args.get("prefix", default="", type=str)
+    scope = _scope_from_request(request.args)
+    conn = _open()
     try:
-        conn = analysis.open_analysis(_analyses_dir(), analysis_id, read_only=True)
-    except FileNotFoundError:
-        abort(404)
-    try:
-        # Paths whose parent is a complex (object) field get an "object" drill.
-        object_path_set = analysis.object_field_paths(conn)
-        # A scalar array field (path ending in ``[]`` that is itself a stored leaf,
-        # e.g. ``content_type[]`` or ``subjects[].value[]``) gets a per-record
-        # element-count table. Object prefixes like ``subjects[]`` are not stored
-        # paths, so they don't match.
-        is_scalar_array = bool(
-            prefix.endswith("[]")
-            and conn.execute(
-                "select 1 from eav where path = ? limit 1", [prefix]
-            ).fetchone()
-        )
+        with analysis.scoped(conn, scope):
+            # Paths whose parent is a complex (object) field get an "object" drill.
+            object_path_set = analysis.object_field_paths(conn)
+            # A scalar array field (path ending in ``[]`` that is itself a stored leaf)
+            # gets a per-record element-count table.
+            is_scalar_array = bool(
+                prefix.endswith("[]")
+                and conn.execute(
+                    "select 1 from eav where path = ? limit 1", [prefix]
+                ).fetchone()
+            )
     finally:
         conn.close()
-    # When the page is scoped to one member path of an object field, offer a link
-    # to that whole object unfiltered (every instance, not one value at a time).
     object_prefix = (
         _collapsed_object_prefix(prefix) if prefix in object_path_set else None
     )
+    scope_args = _scope_args(request.args)
     return render_template(
         "analysis_values.html",
-        analysis_id=analysis_id,
         prefix=prefix,
         columns=analysis.PATH_VALUE_COLUMNS,
         object_paths=sorted(object_path_set),
         object_prefix=object_prefix,
         record_count_path=prefix if is_scalar_array else None,
+        scope_args=scope_args,
+        scope_qs=urlencode(scope_args),
+        whole_corpus_url=url_for("analysis.values", prefix=prefix),
     )
 
 
-@analysis_bp.get("/<analysis_id>/values/data")
-def values_data(analysis_id: str):
+@analysis_bp.get("/values/data")
+def values_data():
     """DataTables server-side endpoint for the path-scoped value table."""
     prefix = request.args.get("prefix", default="", type=str)
     return _table_data(
-        analysis_id,
         analysis.PATH_VALUE_COLUMNS,
         lambda conn, search, oc, od, limit, offset: analysis.path_values(
             conn, prefix, search=search, order_col=oc, order_dir=od,
@@ -303,16 +361,12 @@ def values_data(analysis_id: str):
     )
 
 
-@analysis_bp.get("/<analysis_id>/values/records/data")
-def values_records_data(analysis_id: str):
-    """DataTables endpoint for the per-record element-count table of a scalar
-    array field (one row per record carrying the path)."""
+@analysis_bp.get("/values/records/data")
+def values_records_data():
+    """DataTables endpoint for the per-record element-count table of a scalar array."""
     path = request.args.get("path", default="", type=str)
-    # Displayed columns only (record link + count); identity columns ride along in
-    # the row dicts for the link.
     display_cols = ["timdex_record_id", "element_count"]
     return _table_data(
-        analysis_id,
         display_cols,
         lambda conn, search, oc, od, limit, offset: analysis.path_record_counts(
             conn, path, search=search, order_col=oc, order_dir=od,
@@ -341,15 +395,9 @@ def _member_label(member_path: str, object_prefix: str) -> str:
 def _object_request() -> tuple[str, str, str | None]:
     """Parse the object-drill request into ``(object_prefix, path, value)``.
 
-    Two entry points share this route:
-
-    - *Value-filtered* (from the values view): ``path`` is a member leaf (e.g.
-      ``dates[].kind``) and ``value`` is set; the object prefix is the leaf's
-      collapsed parent (``dates[]``).
-    - *Unfiltered* (from the root schema table): ``value`` is absent and ``path``
-      is the object prefix itself (e.g. ``subjects[]`` or a non-array ``citation``).
-
-    ``None`` value is preserved -- distinct from a present-but-empty value.
+    Value-filtered (from the values view): ``path`` is a member leaf and ``value`` is
+    set; the object prefix is the leaf's collapsed parent. Unfiltered (from the schema
+    table): ``value`` is absent and ``path`` is the object prefix itself.
     """
     path = request.args.get("path", default="", type=str)
     value = request.args.get("value", default=None, type=str)
@@ -357,14 +405,8 @@ def _object_request() -> tuple[str, str, str | None]:
     return object_prefix, path, value
 
 
-def _object_columns(
-    conn, object_prefix: str, path: str, value: str | None
-) -> tuple[list[str], list[dict]]:
-    """(member_paths, display columns) for the object table under ``object_prefix``.
-
-    ``columns`` carry the ``c{i}`` data key, the object-relative ``label``, and the
-    underlying ``path``; ordered deterministically so page + data endpoint agree.
-    """
+def _object_columns(conn, object_prefix: str, path: str, value: str | None):
+    """(member_paths, display columns) for the object table under ``object_prefix``."""
     member_paths = analysis.object_columns(
         conn, object_prefix, value_path=path, value=value
     )
@@ -375,60 +417,55 @@ def _object_columns(
     return member_paths, columns
 
 
-@analysis_bp.get("/<analysis_id>/object")
-def object_page(analysis_id: str) -> str:
-    """Parent-object drill: object instances under a complex field, pivoted.
-
-    One row per object instance (e.g. each ``subjects[X]``) with its member fields
-    as columns -- the holistic parent object, not just one matched leaf. Scoped to
-    a ``value`` when given, otherwise every instance under the field.
-    """
-    _check_analysis_id(analysis_id)
+@analysis_bp.get("/object")
+def object_page() -> str:
+    """Parent-object drill: object instances under a complex field, pivoted."""
     object_prefix, path, value = _object_request()
+    scope = _scope_from_request(request.args)
+    conn = _open()
     try:
-        conn = analysis.open_analysis(_analyses_dir(), analysis_id, read_only=True)
-    except FileNotFoundError:
-        abort(404)
-    try:
-        _, columns = _object_columns(conn, object_prefix, path, value)
-        # Schema/shape of the complex field: per-member type + per-object counts.
-        member_stats = analysis.object_member_stats(conn, object_prefix)
+        with analysis.scoped(conn, scope):
+            _, columns = _object_columns(conn, object_prefix, path, value)
+            member_stats = analysis.object_member_stats(conn, object_prefix)
     finally:
         conn.close()
+    scope_args = _scope_args(request.args)
+    whole_corpus_url = (
+        url_for("analysis.object_page", path=path)
+        if value is None
+        else url_for("analysis.object_page", path=path, value=value)
+    )
     return render_template(
         "analysis_object.html",
-        analysis_id=analysis_id,
         path=path,
         value=value,
         object_prefix=object_prefix,
         columns=columns,
         member_stats=member_stats,
-        # The per-record shape table is a field-level overview, so only on the
-        # unfiltered drill (not the value-scoped view).
         show_record_shape=value is None,
+        scope_args=scope_args,
+        scope_qs=urlencode(scope_args),
+        whole_corpus_url=whole_corpus_url,
     )
 
 
-@analysis_bp.get("/<analysis_id>/object/data")
-def object_data(analysis_id: str):
+@analysis_bp.get("/object/data")
+def object_data():
     """DataTables server-side endpoint for the parent-object drill."""
-    _check_analysis_id(analysis_id)
     object_prefix, path, value = _object_request()
-    # Recompute member columns (deterministic order -> matches the page) so the
-    # order-by whitelist and the SQL pivot stay in lockstep.
+    scope = _scope_from_request(request.args)
+    # Recompute member columns (deterministic order) so the order-by whitelist and the
+    # SQL pivot stay in lockstep -- under the same scope as the data rows.
+    conn = _open()
     try:
-        conn = analysis.open_analysis(_analyses_dir(), analysis_id, read_only=True)
-    except FileNotFoundError:
-        abort(404)
-    try:
-        member_paths = analysis.object_columns(
-            conn, object_prefix, value_path=path, value=value
-        )
+        with analysis.scoped(conn, scope):
+            member_paths = analysis.object_columns(
+                conn, object_prefix, value_path=path, value=value
+            )
     finally:
         conn.close()
     display_cols = ["timdex_record_id"] + [f"c{i}" for i in range(len(member_paths))]
     return _table_data(
-        analysis_id,
         display_cols,
         lambda conn, search, oc, od, limit, offset: analysis.object_rows(
             conn, object_prefix, member_paths, value_path=path, value=value,
@@ -437,21 +474,12 @@ def object_data(analysis_id: str):
     )
 
 
-@analysis_bp.get("/<analysis_id>/object/records/data")
-def object_records_data(analysis_id: str):
-    """DataTables endpoint for the per-record shape table of an object field.
-
-    One row per record under the (unfiltered) object prefix, with its object-node
-    count and value spread -- sort ``objects`` desc to find the record carrying
-    the most instances.
-    """
+@analysis_bp.get("/object/records/data")
+def object_records_data():
+    """DataTables endpoint for the per-record shape table of an object field."""
     object_prefix, _path, _value = _object_request()
-    # Displayed columns (positional, for the order-index whitelist). The row dicts
-    # still carry run_id/run_record_offset for the record link; those just aren't
-    # shown as their own columns.
     display_cols = ["timdex_record_id", "objects", "total_values", "max_per_object"]
     return _table_data(
-        analysis_id,
         display_cols,
         lambda conn, search, oc, od, limit, offset: analysis.object_record_shape(
             conn, object_prefix, search=search, order_col=oc, order_dir=od,
@@ -460,26 +488,29 @@ def object_records_data(analysis_id: str):
     )
 
 
-@analysis_bp.get("/<analysis_id>/records")
-def value_records_page(analysis_id: str) -> str:
+@analysis_bp.get("/records")
+def value_records_page() -> str:
     """Records that carry a given value at a given path (value -> records drill)."""
-    _check_analysis_id(analysis_id)
+    scope_args = _scope_args(request.args)
+    path = request.args.get("path", default="", type=str)
+    value = request.args.get("value", default="", type=str)
     return render_template(
         "analysis_records.html",
-        analysis_id=analysis_id,
-        path=request.args.get("path", default="", type=str),
-        value=request.args.get("value", default="", type=str),
+        path=path,
+        value=value,
         columns=analysis.VALUE_RECORD_COLUMNS,
+        scope_args=scope_args,
+        scope_qs=urlencode(scope_args),
+        whole_corpus_url=url_for("analysis.value_records_page", path=path, value=value),
     )
 
 
-@analysis_bp.get("/<analysis_id>/records/data")
-def value_records_data(analysis_id: str):
+@analysis_bp.get("/records/data")
+def value_records_data():
     """DataTables server-side endpoint for the value -> records drill."""
     path = request.args.get("path", default="", type=str)
     value = request.args.get("value", default="", type=str)
     return _table_data(
-        analysis_id,
         analysis.VALUE_RECORD_COLUMNS,
         lambda conn, search, oc, od, limit, offset: analysis.value_records(
             conn, path, value, search=search, order_col=oc, order_dir=od,

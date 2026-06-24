@@ -1,0 +1,64 @@
+{# Shared "you're viewing a subset" banner. Included on the corpus dashboard and
+   every drill-down page so the active scope is obvious everywhere, not just on the
+   landing page. Renders nothing for the whole corpus (empty `scope_args`).
+
+   Context it reads:
+   - scope_args        (required) dict of f_* scope params -> value
+   - whole_corpus_url  (required) where "view whole corpus" links
+   - doc_total         (optional) scoped doc count, shown if provided
+   - doc_count         (optional) whole-corpus doc count, for the "X of Y" form #}
+{% if scope_args %}
+<style>
+  .scope-banner {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    background: #fff7e6;
+    border: 1px solid #f0d9a8;
+    border-left: 5px solid #e0a83a;
+    border-radius: 6px;
+    padding: 0.5rem 0.8rem;
+    margin: 0.6rem 0 1rem;
+    font-size: 0.85rem;
+    font-family: system-ui, sans-serif;
+  }
+  .scope-banner .pill {
+    background: #e0a83a;
+    color: #fff;
+    font-weight: 700;
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    padding: 0.12rem 0.45rem;
+    border-radius: 999px;
+    flex: none;
+  }
+  .scope-banner code {
+    background: #fbeecb;
+    padding: 0.05rem 0.35rem;
+    border-radius: 3px;
+    font-size: 0.82rem;
+    font-family: ui-monospace, monospace;
+  }
+  .scope-banner a {
+    color: #8a5a00;
+    white-space: nowrap;
+  }
+  .scope-banner .count {
+    color: #9a7b3a;
+    margin-left: auto;
+    font-size: 0.78rem;
+    white-space: nowrap;
+  }
+</style>
+<div class="scope-banner">
+  <span class="pill">SUBSET</span>
+  {% for k, v in scope_args.items() %}<code>{{ k[2:] }} = {{ v }}</code>{% endfor %}
+  <a href="{{ whole_corpus_url }}">view whole corpus &rarr;</a>
+  {% if doc_total is defined and doc_total is not none %}
+  <span class="count"
+    >{{ "{:,}".format(doc_total) }}{% if doc_count is defined and doc_count %} of {{ "{:,}".format(doc_count) }}{% endif %} docs</span
+  >
+  {% endif %}
+</div>
+{% endif %}

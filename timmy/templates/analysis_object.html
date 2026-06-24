@@ -79,10 +79,11 @@
   <body>
     {% include "_nav.html" %}
     <p>
-      <a class="back" href="{{ url_for('analysis.values', analysis_id=analysis_id, prefix=path) }}">&larr; Back to values for {{ path }}</a>
+      <a class="back" href="{{ url_for('analysis.values', prefix=path, **scope_args) }}">&larr; Back to values for {{ path }}</a>
       &nbsp;&middot;&nbsp;
-      <a class="back" href="{{ url_for('analysis.detail', analysis_id=analysis_id) }}">Analysis</a>
+      <a class="back" href="{{ url_for('analysis.index', **scope_args) }}">Corpus</a>
     </p>
+    {% include "_scope_banner.html" %}
     <h1>
       {% if value is none %}
       All <code>{{ object_prefix or path }}</code> objects
@@ -123,7 +124,7 @@
           <td class="num">{{ m.presence_pct }}%</td>
           <td class="num">{{ m.count_min }} / {{ m.count_avg }} / {{ m.count_max }}</td>
           <td>
-            <a href="{{ url_for('analysis.values', analysis_id=analysis_id, prefix=m.path) }}"
+            <a href="{{ url_for('analysis.values', prefix=m.path, **scope_args) }}"
               >view values &rarr;</a
             >
           </td>
@@ -176,6 +177,8 @@
       // Base for record links: /record/<id>/<run_id>/<offset> (exact version).
       const RECORD_BASE =
         "{{ url_for('main.records') }}".replace(/records$/, "record/");
+      const SCOPE = {{ scope_args | tojson }};
+      const SCOPE_QS = {{ scope_qs | tojson }};
 
       function recordHref(id, runId, offset) {
         return (
@@ -185,7 +188,7 @@
           encodeURIComponent(runId) +
           "/" +
           encodeURIComponent(offset) +
-          "?analysis={{ analysis_id }}"
+          (SCOPE_QS ? "?" + SCOPE_QS : "")
         );
       }
 
@@ -209,13 +212,14 @@
         serverSide: true,
         processing: true,
         ajax: {
-          url: "{{ url_for('analysis.object_data', analysis_id=analysis_id) }}",
+          url: "{{ url_for('analysis.object_data') }}",
           data: function (d) {
             d.path = PATH;
             // Only send `value` for the filtered view. When unfiltered VALUE is
             // null; omitting the param (vs sending an empty string) is what tells
             // the server "all objects" rather than "value = ''".
             if (VALUE !== null) d.value = VALUE;
+            Object.assign(d, SCOPE);
           },
         },
         orderMulti: false,
@@ -232,9 +236,10 @@
           serverSide: true,
           processing: true,
           ajax: {
-            url: "{{ url_for('analysis.object_records_data', analysis_id=analysis_id) }}",
+            url: "{{ url_for('analysis.object_records_data') }}",
             data: function (d) {
               d.path = PATH; // unfiltered -> path is the object prefix
+              Object.assign(d, SCOPE);
             },
           },
           orderMulti: false,

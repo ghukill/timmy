@@ -1,0 +1,61 @@
+{# Schema-overview table for a scope. Rendered server-side and loaded into the corpus
+   dashboard asynchronously (see analysis_detail.html), so a large subset's first,
+   uncached report computes behind a spinner instead of blocking the whole page. Styling
+   lives in analysis_detail.html (this fragment is only ever injected there).
+
+   Context: report (list), doc_total (coverage denominator), scope_args (drill links),
+   scoped (bool). #}
+{% if not report %}
+<p class="empty">No fields &mdash; this {{ "subset" if scoped else "corpus" }} produced no flattened rows.</p>
+{% else %}
+<div class="report-wrap">
+  <table class="report" id="report" style="width: 100%">
+    <thead>
+      <tr>
+        <th>field</th>
+        <th>type</th>
+        <th>coverage</th>
+        <th class="num shape-col" title="Cardinality within a single record: min / avg / max.">Counts per Record</th>
+        <th class="num">distinct</th>
+        <th>sample / members</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for f in report %}
+      <tr class="{{ 'full' if f.coverage_pct == 100 else '' }}">
+        <td>
+          {% if f.is_complex %}
+          <a class="obj-field" title="Drill into {{ f.field }} objects"
+            href="{{ url_for('analysis.object_page', path=f.drill_path, **scope_args) }}">{{ f.field }}</a>
+          {% else %}
+          <a href="{{ url_for('analysis.values', prefix=f.drill_path, **scope_args) }}">{{ f.field }}</a>
+          {% endif %}
+        </td>
+        <td><span class="ftype {{ 'complex' if f.is_complex else '' }}">{{ f.type }}</span></td>
+        <td data-order="{{ f.coverage_pct }}">
+          <div class="cov">
+            <div class="cov-bar">
+              <div class="cov-fill" style="width: {{ f.coverage_pct }}%"></div>
+            </div>
+            <span class="cov-pct">{{ f.coverage_pct }}%</span>
+            <span class="cov-count">{{ f.doc_count }}/{{ doc_total }}</span>
+          </div>
+        </td>
+        <td class="num shape-col" data-order="{{ f.count_max if f.is_array else -1 }}">
+          {% if f.is_array %}<span class="shape"
+            >{{ f.count_min }}<span class="sep">/</span>{{ f.count_avg }}<span class="sep">/</span>{{ f.count_max }}</span
+          >{% endif %}
+        </td>
+        <td class="num" data-order="{{ f.distinct_values }}">
+          {{ "{:,}".format(f.distinct_values) }}{% if f.is_complex %}
+          <span class="cov-count">objects</span>{% endif %}
+        </td>
+        <td class="sample" title="{{ f.sample_value if f.sample_value is not none else '' }}">
+          {{ f.sample_value if f.sample_value is not none else "" }}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}

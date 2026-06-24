@@ -36,10 +36,11 @@
   <body>
     {% include "_nav.html" %}
     <p>
-      <a class="back" href="{{ url_for('analysis.values', analysis_id=analysis_id, prefix=path) }}">&larr; Back to values for {{ path }}</a>
+      <a class="back" href="{{ url_for('analysis.values', prefix=path, **scope_args) }}">&larr; Back to values for {{ path }}</a>
       &nbsp;&middot;&nbsp;
-      <a class="back" href="{{ url_for('analysis.detail', analysis_id=analysis_id) }}">Analysis</a>
+      <a class="back" href="{{ url_for('analysis.index', **scope_args) }}">Corpus</a>
     </p>
+    {% include "_scope_banner.html" %}
     <h1>
       Records where <code>{{ path }}</code> = <code>{{ value }}</code>
     </h1>
@@ -62,6 +63,8 @@
       // Base for record links: /record/<id>/<run_id>/<offset> (exact version).
       const RECORD_BASE =
         "{{ url_for('main.records') }}".replace(/records$/, "record/");
+      const SCOPE = {{ scope_args | tojson }};
+      const SCOPE_QS = {{ scope_qs | tojson }};
 
       function recordHref(id, runId, offset) {
         return (
@@ -71,7 +74,7 @@
           encodeURIComponent(runId) +
           "/" +
           encodeURIComponent(offset) +
-          "?analysis={{ analysis_id }}"
+          (SCOPE_QS ? "?" + SCOPE_QS : "")
         );
       }
 
@@ -79,10 +82,11 @@
         serverSide: true,
         processing: true,
         ajax: {
-          url: "{{ url_for('analysis.value_records_data', analysis_id=analysis_id) }}",
+          url: "{{ url_for('analysis.value_records_data') }}",
           data: function (d) {
             d.path = PATH;
             d.value = VALUE;
+            Object.assign(d, SCOPE);
           },
         },
         orderMulti: false,

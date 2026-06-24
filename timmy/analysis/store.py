@@ -1,56 +1,26 @@
-"""Materialize a TIMDEX metadata analysis as a standalone DuckDB file.
+"""The shared EAV query layer over a ``docs``/``eav`` DuckDB schema.
 
-Each analysis is one self-contained ``<analysis_id>.duckdb`` file holding three
-tables:
+The corpus (:mod:`timmy.analysis.corpus`) materializes every current record into one
+``corpus.duckdb`` with ``docs`` (one row per record version) and ``eav`` (one row per
+flattened JSON leaf; see :mod:`timmy.analysis.flatten`). This module holds the read side
+both the corpus and the ``/analysis`` blueprint use: per-field coverage / schema
+overview (:func:`top_level_fields`), value-frequency and value->records drills
+(:func:`path_values`, :func:`value_records`), and the parent-object drills
+(:func:`object_columns`, :func:`object_rows`, :func:`object_member_stats`, …).
 
-- ``docs``     -- one row per analyzed record version (the dimension).
-- ``eav``      -- the flattened transformed payload, one row per leaf
-  (see :mod:`timmy.analysis.flatten`).
-- ``manifest`` -- a single row describing how the analysis was built (the
-  filter predicate, source dataset, counts, timestamps) so the artifact is
-  self-describing and reproducible.
-
-Keeping each analysis in its own file makes it immutable, portable, and trivial
-to drop; comparisons across analyses are opt-in via DuckDB ``ATTACH``. The build
-reads transformed payloads through TDA's metadata-driven read path, so it must
-run while the caller holds the app's ``dataset_lock`` (the Flask route does
-this); the write side uses an independent DuckDB connection to the analysis file
-and needs no such coordination.
+Every function takes an open connection and reads bare ``docs``/``eav``, so a caller can
+transparently scope it to a subset by shadowing those tables with temp views (see
+:func:`timmy.analysis.scope.scoped`). The bulk-insert helpers (:func:`_bulk_insert`,
+:data:`EAV_ARROW_SCHEMA`) and :data:`EXCLUDED_FIELDS` are the build-side bits the corpus
+reuses.
 """
 
 from __future__ import annotations
 
-import json
-import logging
-import os
-import re
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import TYPE_CHECKING, Any
-from uuid import uuid4
+from typing import Any
 
 import duckdb
 import pyarrow as pa
-
-from timmy.analysis.flatten import flatten, make_timdex_composite_id
-
-if TYPE_CHECKING:
-    from timdex_dataset_api import TIMDEXDataset
-
-logger = logging.getLogger(__name__)
-
-# Columns pulled per record: the identity/metadata for `docs` plus the payload
-# we flatten. transformed_record arrives as the raw JSON text TDA stored.
-READ_COLUMNS = [
-    "timdex_record_id",
-    "source",
-    "run_id",
-    "run_record_offset",
-    "transformed_record",
-]
-
-# Records are profiled in their current form by default.
-DEFAULT_TABLE = "current_records"
 
 # Top-level transformed fields dropped before flattening: provenance/bookkeeping
 # that isn't descriptive content worth profiling. Removing the key means these
@@ -63,20 +33,11 @@ EXCLUDED_FIELDS = frozenset({"timdex_provenance"})
 # multi-million-record scale: EAV fans out to ~tens of rows per doc).
 BUILD_FLUSH_EVERY = 2000
 
-# Arrow schemas mirroring the `docs`/`eav` SQL tables. Rows are buffered as
-# tuples, then pivoted into an Arrow table per flush and bulk-loaded via
-# `register` + `insert ... select` -- ~200x faster than row-at-a-time
-# `executemany` (see scratch/ideas.md "Analysis build performance"). Explicit
-# types keep `run_record_offset` a bigint and let `value` carry nulls.
-DOCS_ARROW_SCHEMA = pa.schema(
-    [
-        ("timdex_composite_id", pa.string()),
-        ("source", pa.string()),
-        ("timdex_record_id", pa.string()),
-        ("run_id", pa.string()),
-        ("run_record_offset", pa.int64()),
-    ]
-)
+# Arrow schema mirroring the `eav` SQL table (the corpus reuses this). Rows are
+# buffered as tuples, then pivoted into an Arrow table per flush and bulk-loaded via
+# `register` + `insert ... select` -- ~200x faster than row-at-a-time `executemany`
+# (see scratch/ideas.md "Analysis build performance"). Explicit types let `value`
+# carry nulls.
 EAV_ARROW_SCHEMA = pa.schema(
     [
         ("timdex_composite_id", pa.string()),
@@ -115,279 +76,6 @@ def _bulk_insert(
         con.execute(f"insert into {table} select * from _bulk_batch")  # noqa: S608
     finally:
         con.unregister("_bulk_batch")
-
-SCHEMA_SQL = """
-create table docs (
-    timdex_composite_id text primary key,
-    source text,
-    timdex_record_id text,
-    run_id text,
-    run_record_offset bigint
-);
-
-create table eav (
-    timdex_composite_id text,
-    path text,
-    path_indexed text,
-    value text,
-    value_type text
-);
-
-create table manifest (
-    analysis_id text,
-    created_at timestamp,
-    dataset_location text,
-    table_name text,
-    where_predicate text,
-    filters_json text,
-    label text,
-    doc_count bigint,
-    eav_count bigint,
-    skipped_count bigint,
-    name text,
-    notes text
-);
-
-create table field_usage_report (
-    computed_at timestamp,
-    report_json text
-);
-"""
-
-# Single-row table caching the (expensive) schema-overview report so the analysis
-# landing page is instant instead of re-scanning the whole eav table on every
-# view. The report is the JSON-serialized output of top_level_fields(); at the
-# multi-million-record scale that computation takes minutes, so it is materialized
-# once at build time (see scratch/ideas.md "Analysis build performance").
-FIELD_USAGE_REPORT_TABLE = "field_usage_report"
-
-
-# The shape new_analysis_id() produces: <UTC stamp>-<8 hex>. Validating against
-# it also blocks path traversal, since the id doubles as the DB filename stem.
-ANALYSIS_ID_RE = re.compile(r"^\d{8}T\d{6}-[0-9a-f]{8}$")
-
-
-def new_analysis_id() -> str:
-    """A human-sortable, collision-resistant id (also the DB filename stem)."""
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-    return f"{stamp}-{uuid4().hex[:8]}"
-
-
-def is_valid_analysis_id(analysis_id: str) -> bool:
-    """True if ``analysis_id`` matches our generated format (also blocks traversal)."""
-    return bool(ANALYSIS_ID_RE.match(analysis_id))
-
-
-def analysis_path(analyses_dir: str | os.PathLike[str], analysis_id: str) -> Path:
-    """Resolve the on-disk path of an analysis DB by id."""
-    return Path(analyses_dir) / f"{analysis_id}.duckdb"
-
-
-def build_analysis(
-    dataset: TIMDEXDataset,
-    analyses_dir: str | os.PathLike[str],
-    *,
-    where: str | None = None,
-    table: str = DEFAULT_TABLE,
-    limit: int | None = None,
-    label: str | None = None,
-    name: str | None = None,
-    notes: str | None = None,
-    **filters: Any,
-) -> dict[str, Any]:
-    """Build one analysis DB from records matching a filter; return its manifest.
-
-    ``where`` is a raw SQL predicate and ``**filters`` are TDA typed filters
-    (e.g. ``source="libguides"``); both are forwarded to TDA's read path and
-    recorded in the manifest. ``limit`` caps how many records TDA reads (its own
-    ``read_dicts_iter`` limit). Records with no ``transformed_record`` (e.g. a
-    current version whose latest action is a delete) contribute nothing and are
-    counted under ``skipped_count``.
-
-    The build writes to a ``.building`` temp file and atomically renames it into
-    place on success, so a failed build never leaves a half-written artifact.
-    """
-    analyses_dir = Path(analyses_dir)
-    analyses_dir.mkdir(parents=True, exist_ok=True)
-
-    analysis_id = new_analysis_id()
-    final_path = analysis_path(analyses_dir, analysis_id)
-    building_path = final_path.with_suffix(".duckdb.building")
-    building_path.unlink(missing_ok=True)
-
-    created_at = datetime.now(timezone.utc)
-    doc_count = eav_count = skipped_count = 0
-
-    con = duckdb.connect(str(building_path))
-    try:
-        con.execute(SCHEMA_SQL)
-
-        doc_rows: list[tuple] = []
-        eav_rows: list[tuple] = []
-
-        def flush() -> None:
-            _bulk_insert(con, "docs", DOCS_ARROW_SCHEMA, doc_rows)
-            doc_rows.clear()
-            _bulk_insert(con, "eav", EAV_ARROW_SCHEMA, eav_rows)
-            eav_rows.clear()
-
-        for rec in dataset.records.read_dicts_iter(
-            table=table,
-            columns=READ_COLUMNS,
-            where=where,
-            limit=limit,
-            **filters,
-        ):
-            payload = rec.get("transformed_record")
-            if not payload:
-                skipped_count += 1
-                continue
-
-            parsed = json.loads(payload)
-            for field in EXCLUDED_FIELDS:
-                parsed.pop(field, None)
-
-            composite_id = make_timdex_composite_id(
-                rec["timdex_record_id"], rec["run_id"], rec["run_record_offset"]
-            )
-            doc_rows.append(
-                (
-                    composite_id,
-                    rec["source"],
-                    rec["timdex_record_id"],
-                    rec["run_id"],
-                    rec["run_record_offset"],
-                )
-            )
-            for leaf in flatten(parsed):
-                eav_rows.append(
-                    (composite_id, leaf.path, leaf.path_indexed, leaf.value, leaf.value_type)
-                )
-                eav_count += 1
-
-            doc_count += 1
-            if doc_count % BUILD_FLUSH_EVERY == 0:
-                flush()
-
-        flush()
-
-        # Index the GROUP BY key now that all rows are in.
-        con.execute("create index eav_path_idx on eav (path)")
-
-        con.execute(
-            "insert into manifest values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                analysis_id,
-                created_at,
-                str(dataset.location),
-                table,
-                where,
-                json.dumps(filters, default=str),
-                label,
-                doc_count,
-                eav_count,
-                skipped_count,
-                name,
-                notes,
-            ],
-        )
-
-        # Materialize the schema-overview report now so the landing page never
-        # has to recompute it (a multi-minute full scan at the 5m-record scale).
-        _write_report_cache(con, top_level_fields(con))
-    except Exception:
-        con.close()
-        building_path.unlink(missing_ok=True)
-        raise
-    con.close()
-
-    os.replace(building_path, final_path)
-    logger.info(
-        "Built analysis %s: %d docs, %d eav rows, %d skipped",
-        analysis_id,
-        doc_count,
-        eav_count,
-        skipped_count,
-    )
-    return read_manifest(analyses_dir, analysis_id)
-
-
-# Per-path coverage stats for the field-usage report. mode() picks the dominant
-# value_type for a path; distinct value count ignores nulls; sample is a
-# deterministic non-null value. The ``count_*`` columns describe how many times a
-# path occurs *within a single doc* (min/avg/max) -- the array-cardinality of the
-# field, which for a scalar non-array path is always 1 but for an array-nested
-# path (anything containing ``[]``) tells you how big it gets per record.
-FIELD_USAGE_SQL = """
-with per_doc as (
-    select path, timdex_composite_id, count(*) as c
-    from eav group by path, timdex_composite_id
-),
-count_stats as (
-    select path, min(c) as count_min, avg(c) as count_avg, max(c) as count_max
-    from per_doc group by path
-)
-select
-    e.path,
-    mode() within group (order by e.value_type) as value_type,
-    count(distinct e.timdex_composite_id) as doc_count,
-    count(distinct e.value) as distinct_values,
-    count(e.value) as value_count,
-    min(e.value) filter (where e.value is not null) as sample_value,
-    cs.count_min, cs.count_avg, cs.count_max
-from eav e
-join count_stats cs using (path)
-group by e.path, cs.count_min, cs.count_avg, cs.count_max
-order by doc_count desc, e.path
-"""
-
-
-def field_usage(conn: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
-    """Per-path coverage report rows for an open analysis connection.
-
-    Coverage is the share of the corpus's docs that have at least one value at
-    that path (``doc_count / total docs``), so 100% means every doc populates
-    the field. ``count_min/avg/max`` give the per-doc occurrence count (the
-    array-cardinality of the field within a record).
-    """
-    total = conn.execute("select count(*) from docs").fetchone()[0]
-    report = []
-    for (
-        path,
-        value_type,
-        doc_count,
-        distinct_values,
-        value_count,
-        sample_value,
-        count_min,
-        count_avg,
-        count_max,
-    ) in conn.execute(FIELD_USAGE_SQL).fetchall():
-        report.append(
-            {
-                "path": path,
-                "value_type": value_type,
-                "doc_count": doc_count,
-                "distinct_values": distinct_values,
-                "value_count": value_count,
-                "sample_value": sample_value,
-                "coverage_pct": round(100 * doc_count / total, 1) if total else 0.0,
-                # Share of values that are distinct: ~100% = free text /
-                # uncontrolled, low = repeated / controlled vocabulary.
-                "pct_unique": (
-                    round(100 * distinct_values / value_count, 1)
-                    if value_count
-                    else None
-                ),
-                # Per-record occurrence count (array cardinality). Only varies for
-                # array-nested paths; the template shows it for those.
-                "count_min": count_min,
-                "count_avg": round(count_avg, 2) if count_avg is not None else None,
-                "count_max": count_max,
-                "is_array": "[" in path,
-            }
-        )
-    return report
 
 
 # Columns for the path-scoped value-frequency table (server-side paginated).
@@ -669,56 +357,6 @@ def distinct_object_count(
         """,  # noqa: S608 -- only constant SQL text is interpolated
         scope_params,
     ).fetchone()[0]
-
-
-def object_field_summaries(
-    conn: duckdb.DuckDBPyConnection,
-) -> list[dict[str, Any]]:
-    """One summary per complex (object) field, for the field-usage report.
-
-    Each entry is a navigational parent -- the collapsed object prefix (e.g.
-    ``dates[]``), how many docs carry it, how many object instances exist
-    (``instance_count``, every occurrence) and how many are distinct by content
-    (``distinct_objects``), plus its member-field paths -- so the report can
-    surface the whole object as a single clickable row above its member leaves.
-    """
-    prefixes = sorted({_collapsed_prefix(p) for p in object_field_paths(conn)})
-    summaries = []
-    for prefix in prefixes:
-        scope_sql, scope_params = _scope_clause(prefix)
-        inst = _instance_expr("path_indexed", prefix.count("]"))
-        doc_count = conn.execute(
-            f"select count(distinct timdex_composite_id) from eav "  # noqa: S608
-            f"where {scope_sql}",
-            scope_params,
-        ).fetchone()[0]
-        instance_count = conn.execute(
-            f"select count(*) from (select distinct timdex_composite_id, "  # noqa: S608
-            f"{inst} as elem from eav where {scope_sql})",
-            scope_params,
-        ).fetchone()[0]
-        # Nodes-per-doc: how many object instances a record carries (the array
-        # cardinality of the complex field), min/avg/max across docs that have it.
-        node_min, node_avg, node_max = conn.execute(
-            f"select min(n), avg(n), max(n) from (select timdex_composite_id, "  # noqa: S608
-            f"count(distinct {inst}) as n from eav where {scope_sql} group by 1)",
-            scope_params,
-        ).fetchone()
-        summaries.append(
-            {
-                "object_prefix": prefix,
-                "doc_count": doc_count,
-                "instance_count": instance_count,
-                "distinct_objects": distinct_object_count(conn, prefix),
-                "node_min": node_min,
-                "node_avg": round(node_avg, 2) if node_avg is not None else None,
-                "node_max": node_max,
-                "members": object_columns(conn, prefix),
-            }
-        )
-    return summaries
-
-
 def object_member_stats(
     conn: duckdb.DuckDBPyConnection, object_prefix: str
 ) -> list[dict[str, Any]]:
@@ -911,86 +549,6 @@ def top_level_fields(conn: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
 
     fields.sort(key=lambda f: (-f["doc_count"], f["field"]))
     return fields
-
-
-def _report_cache_exists(conn: duckdb.DuckDBPyConnection) -> bool:
-    """True if this DB has the field-usage cache table (older builds lack it)."""
-    return bool(
-        conn.execute(
-            "select count(*) from information_schema.tables where table_name = ?",
-            [FIELD_USAGE_REPORT_TABLE],
-        ).fetchone()[0]
-    )
-
-
-def _write_report_cache(
-    conn: duckdb.DuckDBPyConnection, report: list[dict[str, Any]]
-) -> None:
-    """Materialize ``report`` as the single cached field-usage row (replacing any).
-
-    Requires a read-write connection. Creates the cache table if missing so this
-    also backfills analyses built before the cache existed.
-    """
-    conn.execute(
-        f"create table if not exists {FIELD_USAGE_REPORT_TABLE} "  # noqa: S608
-        "(computed_at timestamp, report_json text)"
-    )
-    conn.execute(f"delete from {FIELD_USAGE_REPORT_TABLE}")  # noqa: S608
-    conn.execute(
-        f"insert into {FIELD_USAGE_REPORT_TABLE} values (?, ?)",  # noqa: S608
-        [datetime.now(timezone.utc), json.dumps(report, default=str)],
-    )
-
-
-def _read_report_cache(
-    conn: duckdb.DuckDBPyConnection,
-) -> list[dict[str, Any]] | None:
-    """Return the cached field-usage report, or None if not cached yet."""
-    if not _report_cache_exists(conn):
-        return None
-    row = conn.execute(
-        f"select report_json from {FIELD_USAGE_REPORT_TABLE} limit 1"  # noqa: S608
-    ).fetchone()
-    if not row or not row[0]:
-        return None
-    return json.loads(row[0])
-
-
-def get_field_usage_report(
-    analyses_dir: str | os.PathLike[str], analysis_id: str
-) -> list[dict[str, Any]]:
-    """The schema-overview report for an analysis, served from cache.
-
-    Reads the precomputed report (materialized at build time). For an analysis
-    built before caching existed -- which has no cached row -- it computes the
-    report once and persists it, so the first view pays the cost and every later
-    view is instant. The backfill write is best-effort: if the DB can't be opened
-    read-write (e.g. a concurrent reader holds it), the freshly computed report is
-    still returned, just not cached this time.
-    """
-    conn = open_analysis(analyses_dir, analysis_id, read_only=True)
-    try:
-        cached = _read_report_cache(conn)
-    finally:
-        conn.close()
-    if cached is not None:
-        return cached
-
-    # Cache miss (legacy DB): compute, then backfill so it's instant next time.
-    conn = open_analysis(analyses_dir, analysis_id, read_only=False)
-    try:
-        report = top_level_fields(conn)
-        try:
-            _write_report_cache(conn, report)
-        except Exception:  # noqa: BLE001 -- caching is best-effort
-            logger.warning(
-                "Could not cache field-usage report for %s", analysis_id, exc_info=True
-            )
-    finally:
-        conn.close()
-    return report
-
-
 def _member_label(member_path: str, object_prefix: str) -> str:
     """Object-relative label for a member field: ``subjects[].value[]`` ->
     ``value[]`` under prefix ``subjects[]``. Falls back to the full path."""
@@ -1239,85 +797,3 @@ def _record_table(
         filtered,
         [dict(zip(columns, r, strict=True)) for r in rows],
     )
-
-
-def open_analysis(
-    analyses_dir: str | os.PathLike[str],
-    analysis_id: str,
-    *,
-    read_only: bool = True,
-) -> duckdb.DuckDBPyConnection:
-    """Open a connection to an analysis DB (read-only by default).
-
-    Read-only is the right default for serving queries: the artifact is
-    immutable, and the engine itself then rejects any DDL/DML, which is what
-    makes the user-facing SQL console safe to expose without sanitizing input.
-    """
-    path = analysis_path(analyses_dir, analysis_id)
-    if not path.exists():
-        raise FileNotFoundError(f"No analysis DB at {path}")
-    return duckdb.connect(str(path), read_only=read_only)
-
-
-def read_manifest(
-    analyses_dir: str | os.PathLike[str], analysis_id: str
-) -> dict[str, Any]:
-    """Return the manifest row of an analysis as a dict."""
-    con = open_analysis(analyses_dir, analysis_id)
-    try:
-        cols = [d[0] for d in con.execute("select * from manifest").description]
-        row = con.execute("select * from manifest").fetchone()
-    finally:
-        con.close()
-    return dict(zip(cols, row, strict=True)) if row else {}
-
-
-def update_manifest(
-    analyses_dir: str | os.PathLike[str],
-    analysis_id: str,
-    *,
-    name: str | None = None,
-    notes: str | None = None,
-) -> None:
-    """Set the user-facing name/notes on an analysis (opens read-write).
-
-    Tolerates older analysis DBs built before these columns existed by adding
-    them if missing.
-    """
-    con = open_analysis(analyses_dir, analysis_id, read_only=False)
-    try:
-        con.execute("alter table manifest add column if not exists name text")
-        con.execute("alter table manifest add column if not exists notes text")
-        con.execute("update manifest set name = ?, notes = ?", [name, notes])
-    finally:
-        con.close()
-
-
-def delete_analysis(
-    analyses_dir: str | os.PathLike[str], analysis_id: str
-) -> bool:
-    """Delete an analysis DB file. Returns True if it existed.
-
-    Each analysis is a single self-contained file, so removing it removes the
-    analysis everywhere -- there is no other state that references it.
-    """
-    path = analysis_path(analyses_dir, analysis_id)
-    existed = path.exists()
-    path.unlink(missing_ok=True)
-    return existed
-
-
-def list_analyses(analyses_dir: str | os.PathLike[str]) -> list[dict[str, Any]]:
-    """List built analyses (newest first) by reading each DB's manifest."""
-    analyses_dir = Path(analyses_dir)
-    if not analyses_dir.exists():
-        return []
-    manifests = []
-    for path in analyses_dir.glob("*.duckdb"):
-        try:
-            manifests.append(read_manifest(analyses_dir, path.stem))
-        except Exception:  # noqa: BLE001, S112 -- skip unreadable/partial DBs
-            logger.warning("Could not read manifest from %s", path, exc_info=True)
-            continue
-    manifests.sort(key=lambda m: m.get("created_at") or datetime.min, reverse=True)
-    return manifests
