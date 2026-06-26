@@ -245,77 +245,148 @@ def object_rows(
     becomes a ``c{i}`` column holding that field's value(s) within the object
     (multiple leaves -- e.g. ``value[]`` -- joined with `` | ``). Identity columns
     key each row back to its record version. Returns ``(total, filtered, rows)``.
+
+    Paged in two phases so memory stays bounded by the page size, not the corpus: a
+    popular field (``identifiers[]``) used to build the full pivot of *every*
+    instance just to return one page, spiking RAM into the tens of GB. Phase A
+    resolves only the page's instance keys (no pivot in the common identity-sort /
+    no-search case); phase B pivots just those <=``limit`` instances. ``search``
+    matches a member by its raw leaf value (any ``ilike``) rather than the bracketed
+    pivot string the single-pass query searched.
     """
     value_cols = [f"c{i}" for i in range(len(member_paths))]
     all_cols = OBJECT_IDENTITY_COLUMNS + value_cols
 
     leaf_inst = _instance_expr("e.path_indexed", object_prefix.count("]"))
-    # One string_agg per member field; the path is bound as a parameter. Array
-    # members (path ending in ``[]``) render as a bracketed list -- ``[a, b, c]``
-    # -- so a multi-valued field reads as the array it is; scalar members stay
-    # bare. A null agg (member absent in the instance) yields a null cell either
-    # way (`'[' || NULL || ']'` is NULL), shown blank.
-    pivots = ",\n".join(
-        (
-            f"'[' || string_agg(case when e.path = ? then e.value end, ', ') || ']'"
-            f" as {col}"
-            if mpath.endswith("[]")
-            else f"string_agg(case when e.path = ? then e.value end, ', ') as {col}"
-        )
-        for col, mpath in zip(value_cols, member_paths, strict=True)
-    )
-    pivot_params = list(member_paths)
     hits_sql, hit_params = _object_hits(object_prefix, value_path, value)
-
-    base = f"""
-        with hits as ({hits_sql}),
-        elems as (
-            select e.timdex_composite_id, h.elem,
-                   d.timdex_record_id, d.run_id, d.run_record_offset,
-                   {pivots}
-            from eav e
-            join hits h
-              on e.timdex_composite_id = h.timdex_composite_id
-             and {leaf_inst} = h.elem
-            join docs d on d.timdex_composite_id = e.timdex_composite_id
-            group by e.timdex_composite_id, h.elem,
-                     d.timdex_record_id, d.run_id, d.run_record_offset
-        )
-        select {", ".join(all_cols)} from elems
-    """  # noqa: S608 -- columns are constant; the prefix/value are parameters
-    # Param order follows the SQL text: hits params first, then each pivot path.
-    base_params = [*hit_params, *pivot_params]
-
-    total = conn.execute(
-        f"select count(*) from ({base})", base_params  # noqa: S608
-    ).fetchone()[0]
-
-    params = list(base_params)
-    search_sql = ""
-    if search:
-        cols_for_search = ["timdex_record_id", *value_cols]
-        ors = " or ".join(f"{c} ilike ?" for c in cols_for_search)
-        search_sql = f" where {ors}"
-        params += [f"%{search}%"] * len(cols_for_search)
-    filtered = conn.execute(
-        f"select count(*) from ({base}){search_sql}", params  # noqa: S608
-    ).fetchone()[0]
 
     if order_col not in all_cols:
         order_col = "timdex_record_id"
     direction = "desc" if order_dir == "desc" else "asc"
-    rows = conn.execute(
-        f"select * from ({base}){search_sql} "  # noqa: S608
-        # secondary sort by element keeps a record's elements grouped together
-        f"order by {order_col} {direction}, timdex_record_id, run_record_offset "
+    order_is_member = order_col in value_cols
+
+    # One string_agg per member field; the path is bound as a parameter. Array
+    # members (path ending in ``[]``) render as a bracketed list -- ``[a, b, c]`` --
+    # so a multi-valued field reads as the array it is; scalar members stay bare. A
+    # null agg (member absent in the instance) yields a null cell either way
+    # (`'[' || NULL || ']'` is NULL), shown blank.
+    def _pivot(mpath: str) -> str:
+        agg = "string_agg(case when e.path = ? then e.value end, ', ')"
+        return f"'[' || {agg} || ']'" if mpath.endswith("[]") else agg
+
+    # ----- total: number of object instances (unfiltered) -- no pivot needed ----
+    total = conn.execute(
+        f"select count(*) from ({hits_sql})", hit_params  # noqa: S608
+    ).fetchone()[0]
+
+    # ----- phase A: pick the page's instance keys, WITHOUT pivoting the corpus ----
+    # The pivot is the expensive part, so it is deferred to phase B and run only for
+    # the <=``limit`` instances that actually land on the page. Here we resolve just
+    # the keys: one row per instance with its record identity. ``order by`` adds a
+    # final ``elem`` tiebreak so paging is deterministic across requests (the old
+    # query left intra-record instance order undefined).
+    prelude = [f"hits as ({hits_sql})"]
+    params: list[Any] = list(hit_params)
+    prelude.append(
+        "roster as ("
+        " select h.timdex_composite_id as cid, h.elem,"
+        " d.timdex_record_id, d.run_id, d.run_record_offset"
+        " from hits h join docs d on d.timdex_composite_id = h.timdex_composite_id)"
+    )
+
+    # The cheap path (default page load: identity sort, no search) reads straight off
+    # the roster. Ordering or searching by a *member value* needs that value, so we
+    # build a one-aggregate-per-instance ``agg`` CTE: just the ordering column and/or
+    # a search-match flag -- never the full N-column pivot, and never with docs in the
+    # group. Search matches a member by raw value (any leaf ``ilike``), not against
+    # the bracketed/joined pivot string the old query searched.
+    if search or order_is_member:
+        agg_select, where_sql = [], ""
+        if order_is_member:
+            agg_select.append(f"{_pivot(member_paths[int(order_col[1:])])} as ord")
+            params.append(member_paths[int(order_col[1:])])
+        if search:
+            agg_select.append("max(case when e.value ilike ? then 1 else 0 end) as m")
+            params.append(f"%{search}%")
+        prelude.append(
+            f"agg as (select e.timdex_composite_id as cid, h.elem, "
+            f"{', '.join(agg_select)} from eav e join hits h"
+            f" on e.timdex_composite_id = h.timdex_composite_id"
+            f" and {leaf_inst} = h.elem group by cid, h.elem)"
+        )
+        if search:
+            where_sql = " where r.timdex_record_id ilike ? or a.m = 1"
+            params.append(f"%{search}%")
+        prelude.append(
+            "keyed as ("
+            " select r.cid, r.elem, r.timdex_record_id, r.run_id, r.run_record_offset"
+            f"{', a.ord as ord' if order_is_member else ''}"
+            " from roster r join agg a on a.cid = r.cid and a.elem = r.elem"
+            f"{where_sql})"
+        )
+        source = "keyed"
+    else:
+        source = "roster"
+
+    with_sql = "with " + ", ".join(prelude)
+    filtered = (
+        total
+        if source == "roster"
+        else conn.execute(
+            f"{with_sql} select count(*) from {source}", params  # noqa: S608
+        ).fetchone()[0]
+    )
+
+    order_sql = "ord" if order_is_member else order_col
+    page = conn.execute(
+        f"{with_sql} select cid, elem, timdex_record_id, run_id, run_record_offset "  # noqa: S608
+        f"from {source} "
+        f"order by {order_sql} {direction}, timdex_record_id, run_record_offset, elem "
         f"limit ? offset ?",
         [*params, limit, offset],
     ).fetchall()
-    return (
-        total,
-        filtered,
-        [dict(zip(all_cols, r, strict=True)) for r in rows],
-    )
+
+    if not page:
+        return total, filtered, []
+
+    # ----- phase B: pivot ONLY the page's instances ----
+    # The page keys go in as a literal ``values`` relation carrying an ordinal so the
+    # final order survives the pivot. The extra ``in (...)`` on the composite ids lets
+    # DuckDB seek the eav index instead of scanning the whole table for this handful.
+    identity = {i: row[2:] for i, row in enumerate(page)}
+    if not value_cols:
+        return (
+            total,
+            filtered,
+            [dict(zip(OBJECT_IDENTITY_COLUMNS, identity[i], strict=True))
+             for i in range(len(page))],
+        )
+
+    page_vals, page_params, cids = [], [], []
+    for i, (cid, elem, *_identity) in enumerate(page):
+        page_vals.append("(?, ?, ?)")
+        page_params += [i, cid, elem]
+        cids.append(cid)
+    distinct_cids = list(dict.fromkeys(cids))
+    pivots = ", ".join(f"{_pivot(m)} as {c}" for c, m in zip(value_cols, member_paths))
+    pivot_rows = conn.execute(
+        f"with page(ord_ix, cid, elem) as (values {', '.join(page_vals)}), "  # noqa: S608
+        f"elems as (select p.ord_ix, {pivots} from eav e join page p"
+        f" on e.timdex_composite_id = p.cid and {leaf_inst} = p.elem"
+        f" where e.timdex_composite_id in ({', '.join('?' for _ in distinct_cids)})"
+        f" group by p.ord_ix) "
+        f"select ord_ix, {', '.join(value_cols)} from elems",
+        [*page_params, *member_paths, *distinct_cids],
+    ).fetchall()
+    pivoted = {r[0]: r[1:] for r in pivot_rows}
+
+    blank = (None,) * len(value_cols)
+    rows = []
+    for i in range(len(page)):
+        row = dict(zip(OBJECT_IDENTITY_COLUMNS, identity[i], strict=True))
+        row.update(zip(value_cols, pivoted.get(i, blank), strict=True))
+        rows.append(row)
+    return total, filtered, rows
 
 
 # Separators for an object instance's identity signature. An object's identity
