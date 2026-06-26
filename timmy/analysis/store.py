@@ -208,8 +208,25 @@ def object_columns(
     all collapsed leaf paths living in those objects -- the dynamic columns of the
     object table; ordered by path so the page and data endpoints agree.
     """
+    scope_sql, scope_params = _scope_clause(object_prefix)
+    if value_path is None or value is None:
+        # Unfiltered: the member columns are exactly the distinct paths under the
+        # prefix. No need to scan all of eav and join every leaf to its instance --
+        # an index-backed distinct over the prefix's own paths gives the same set,
+        # which matters for popular fields (``identifiers[]``) where the join would
+        # otherwise sweep the whole table.
+        rows = conn.execute(
+            f"select distinct path from eav where {scope_sql} order by path",  # noqa: S608
+            scope_params,
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    # Value-filtered: restrict to members co-occurring in instances carrying the
+    # value, so the instance join is required. Still scope ``e`` to the prefix's
+    # paths so the join probes only those leaves, not all of eav.
     leaf_inst = _instance_expr("e.path_indexed", object_prefix.count("]"))
     hits_sql, hit_params = _object_hits(object_prefix, value_path, value)
+    e_scope, e_scope_params = _scope_clause(object_prefix, "e.path")
     rows = conn.execute(
         f"""
         with hits as ({hits_sql})
@@ -218,9 +235,10 @@ def object_columns(
         join hits h
           on e.timdex_composite_id = h.timdex_composite_id
          and {leaf_inst} = h.elem
+        where {e_scope}
         order by e.path
         """,  # noqa: S608 -- only constant SQL text is interpolated
-        hit_params,
+        [*hit_params, *e_scope_params],
     ).fetchall()
     return [r[0] for r in rows]
 
@@ -628,17 +646,18 @@ def _member_label(member_path: str, object_prefix: str) -> str:
     return member_path
 
 
-def _scope_clause(prefix: str) -> tuple[str, list]:
+def _scope_clause(prefix: str, col: str = "path") -> tuple[str, list]:
     """SQL predicate + params matching a path and its descendants.
 
     Boundary-aware via ``starts_with`` against the next path separator (``[`` or
     ``.``), so ``subjects`` never matches a hypothetical ``subjectsx`` and we
     avoid LIKE-wildcard escaping entirely. An empty prefix matches every path.
+    ``col`` names the path column to test (e.g. ``e.path`` for an aliased table).
     """
     if not prefix:
         return "true", []
     return (
-        "(path = ? or starts_with(path, ? || '[') or starts_with(path, ? || '.'))",
+        f"({col} = ? or starts_with({col}, ? || '[') or starts_with({col}, ? || '.'))",
         [prefix, prefix, prefix],
     )
 
