@@ -19,6 +19,7 @@ from typing import Any
 import click
 
 from timmy.config import (
+    FIELDS,
     USER_CONFIG_DIR,
     USER_CONFIG_PATH,
     load_config,
@@ -86,6 +87,42 @@ def config_show(ctx: click.Context, as_json: bool) -> None:
 def config_path() -> None:
     """Print the path to the user config file (~/.timmy/config.toml)."""
     click.echo(str(USER_CONFIG_PATH))
+
+
+@config.command("update")
+def config_update() -> None:
+    """Add newly-introduced config fields to ~/.timmy/config.toml (add-only).
+
+    After upgrading Timmy, this backfills any recognised settings the file is missing,
+    each at its default value, so you pick up new knobs without re-running `init`. It
+    never changes or removes a value already in the file; unknown keys are left intact.
+    """
+    import tomllib
+
+    import tomli_w
+
+    if not USER_CONFIG_PATH.exists():
+        raise click.ClickException(
+            f"No config at {USER_CONFIG_PATH}. Run `timmy init` first."
+        )
+    with USER_CONFIG_PATH.open("rb") as fh:
+        existing = tomllib.load(fh)
+
+    added: dict[str, Any] = {}
+    for field in FIELDS:
+        if field.name not in existing and field.default is not None:
+            existing[field.name] = field.default
+            added[field.name] = field.default
+
+    if not added:
+        click.echo("Config already has every known field; nothing to add.", err=True)
+        return
+
+    with USER_CONFIG_PATH.open("wb") as fh:
+        tomli_w.dump(existing, fh)
+    for name, value in added.items():
+        click.echo(f"+ {name} = {value!r}")
+    click.echo(f"Updated {USER_CONFIG_PATH}", err=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -160,6 +197,10 @@ def init(
     if adir:
         payload["analysis_dir"] = adir
     payload["log_level"] = level
+    # Build-parallelism knobs land in the file at their resolved values (default, or an
+    # env/existing override) so they're visible and editable, no prompt needed.
+    payload["build_workers"] = int(current.get("build_workers"))
+    payload["build_batch_size"] = int(current.get("build_batch_size"))
 
     USER_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with USER_CONFIG_PATH.open("wb") as fh:
@@ -528,9 +569,14 @@ def analysis_build(ctx: click.Context, yes: bool, as_json: bool) -> None:
 
     _configure_cli_logging(ctx)
     click.echo("Building corpus from all current records…", err=True)
+    cfg = load_config(ctx.obj["overrides"])
     td = _load_dataset(ctx)
     try:
-        meta = build_corpus(td, analyses_dir, on_progress=_cli_progress())
+        meta = build_corpus(
+            td, analyses_dir,
+            workers=cfg["build_workers"], batch_size=cfg["build_batch_size"],
+            on_progress=_cli_progress(),
+        )
     except Exception as exc:  # noqa: BLE001 -- surface build failures as a clean exit
         raise click.ClickException(f"Corpus build failed: {exc}") from exc
 

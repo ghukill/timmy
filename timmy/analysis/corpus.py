@@ -28,9 +28,13 @@ from __future__ import annotations
 
 import json
 import logging
+import multiprocessing
 import os
-from collections.abc import Callable, Iterable
+from collections import deque
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import Future, ProcessPoolExecutor
 from datetime import date, datetime, timezone
+from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -262,6 +266,219 @@ def _ingest_records(
     return doc_count, eav_count, skipped
 
 
+# --------------------------------------------------------------------------- #
+# Parallel flatten (build path)
+# --------------------------------------------------------------------------- #
+# The build's hot loop is pure-CPU and GIL-bound: per record it does a json.loads
+# plus a recursive flatten(), so a single Python thread pins one core while the rest
+# of the box sits idle (most visible on a many-core machine -- see the M2 vs i5
+# diagnosis). The work is embarrassingly parallel per record, so we fan the
+# parse+flatten across a process pool and keep the DuckDB writes on the main process
+# (one file, one writer). Network reads and DB inserts stay serial; only the CPU part
+# scales out.
+#
+# Tunables via env: TIMMY_BUILD_WORKERS (process count; default cpu_count-1) and
+# TIMMY_BUILD_BATCH (records per task). A batch is the IPC unit -- bigger amortizes
+# task overhead but raises peak per-worker memory and coarsens progress. 1000 keeps a
+# worker's working set small (~190 MiB in testing) at a negligible throughput cost.
+PARALLEL_BATCH = 1000
+
+
+def _build_workers(override: int | str | None = None) -> int:
+    """Worker process count for a parallel build (<=1 selects the serial path).
+
+    Precedence: explicit ``override`` (resolved Timmy config) > ``TIMMY_BUILD_WORKERS``
+    env var > default of ``min(8, cpu_count)``. The default never oversubscribes a
+    small box, and 8 is ample for the flatten fan-out (the main process still serializes
+    the reads + DuckDB inserts, so more workers plateau quickly).
+    """
+    value = override if override is not None else os.environ.get("TIMMY_BUILD_WORKERS")
+    if value is not None:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            pass
+    return min(8, os.cpu_count() or 8)
+
+
+def _build_batch_size(override: int | str | None = None) -> int:
+    """Records per worker task: ``override`` (config) > ``TIMMY_BUILD_BATCH`` > default."""
+    value = override if override is not None else os.environ.get("TIMMY_BUILD_BATCH")
+    if value is not None:
+        try:
+            n = int(value)
+            if n > 0:
+                return n
+        except (TypeError, ValueError):
+            pass
+    return PARALLEL_BATCH
+
+
+def _raise_fd_limit(target: int = 65_536) -> None:
+    """Best-effort: raise the soft open-file limit toward the hard cap for a build.
+
+    A build holds many descriptors open at once -- the dataset's partitioned
+    Parquet/WAL handles (via TDA), DuckDB's own database + WAL + any spill files,
+    and, in parallel mode, a pipe per worker. A low soft ``RLIMIT_NOFILE`` (macOS
+    GUI/launchd contexts default to 256) can then trip "Too many open files" on
+    commit. Bumping the soft limit to the hard cap is the standard db/server remedy;
+    it's a no-op where the limit is already generous, and silently skipped on
+    platforms without ``resource`` (e.g. Windows).
+    """
+    try:
+        import resource
+    except ImportError:
+        return
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        want = target if hard == resource.RLIM_INFINITY else min(target, hard)
+        if soft != resource.RLIM_INFINITY and soft < want:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+            logger.info("Raised open-file soft limit %d -> %d for corpus build", soft, want)
+    except (ValueError, OSError):
+        logger.debug("Could not raise open-file limit", exc_info=True)
+
+
+def _chunked(it: Iterable[Any], n: int) -> Iterator[list[Any]]:
+    """Yield successive ``n``-sized lists from ``it`` (last may be short)."""
+    iterator = iter(it)
+    while batch := list(islice(iterator, n)):
+        yield batch
+
+
+def _rows_to_ipc(schema: pa.Schema, rows: list[tuple]) -> bytes:
+    """Pivot row tuples to a columnar Arrow table and serialize it to IPC bytes.
+
+    The return value is what crosses the process boundary. Pivoting + Arrow encoding
+    in the *worker* (not the main process) is the whole point: it parallelizes the
+    pivot and, crucially, replaces shipping millions of Python tuples (slow to
+    unpickle, one object per cell) with a compact columnar buffer the main process
+    reads back near-zero-cost. Empty buffers are ``b""`` and skipped on the far side.
+    """
+    if not rows:
+        return b""
+    columns = list(zip(*rows, strict=True))
+    table = pa.table(
+        {field.name: pa.array(columns[i], type=field.type)
+         for i, field in enumerate(schema)},
+        schema=schema,
+    )
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, schema) as writer:
+        writer.write_table(table)
+    return sink.getvalue().to_pybytes()
+
+
+def _insert_ipc(con: duckdb.DuckDBPyConnection, table: str, blob: bytes) -> int:
+    """Deserialize an IPC blob (from a worker) and bulk-insert it; return row count."""
+    if not blob:
+        return 0
+    arrow_table = pa.ipc.open_stream(pa.py_buffer(blob)).read_all()
+    con.register("_bulk_batch", arrow_table)
+    try:
+        con.execute(f"insert into {table} select * from _bulk_batch")  # noqa: S608
+    finally:
+        con.unregister("_bulk_batch")
+    return arrow_table.num_rows
+
+
+def _flatten_batch(records: list[dict[str, Any]]) -> tuple[bytes, bytes, int]:
+    """Worker: flatten a batch of raw records into (docs_ipc, eav_ipc, skipped).
+
+    Module-level and pure so it ships cleanly to pool workers. Takes raw record dicts
+    (with their JSON ``transformed_record`` payloads) and does the expensive part --
+    json.loads + flatten + the Arrow pivot -- entirely off the main process, handing
+    back compact Arrow IPC buffers ready to insert. Mirrors the build branch of
+    ``_ingest_records`` (no ``only_composites`` filtering; that's the update path).
+    """
+    doc_rows: list[tuple] = []
+    eav_rows: list[tuple] = []
+    skipped = 0
+    for rec in records:
+        payload = rec.get("transformed_record")
+        if not payload:
+            skipped += 1
+            continue
+        composite = make_timdex_composite_id(
+            rec["timdex_record_id"], rec["run_id"], rec["run_record_offset"]
+        )
+        parsed = json.loads(payload)
+        for field in EXCLUDED_FIELDS:
+            parsed.pop(field, None)
+        doc_rows.append(
+            (
+                composite,
+                rec["source"],
+                rec["timdex_record_id"],
+                rec["run_id"],
+                rec["run_record_offset"],
+                _naive_utc(rec.get("run_timestamp")),
+                _as_date(rec.get("run_date")),
+                rec.get("run_type"),
+                rec.get("action"),
+            )
+        )
+        for leaf in flatten(parsed):
+            eav_rows.append(
+                (composite, leaf.path, leaf.path_indexed, leaf.value, leaf.value_type)
+            )
+    return (
+        _rows_to_ipc(DOCS_ARROW_SCHEMA, doc_rows),
+        _rows_to_ipc(EAV_ARROW_SCHEMA, eav_rows),
+        skipped,
+    )
+
+
+def _ingest_records_parallel(
+    con: duckdb.DuckDBPyConnection,
+    records: Iterable[dict[str, Any]],
+    *,
+    workers: int,
+    batch_size: int,
+    on_progress: OnProgress | None,
+    total: int | None,
+    phase: str,
+) -> tuple[int, int, int]:
+    """Parallel counterpart to ``_ingest_records`` for the full build.
+
+    Streams ``records`` in batches into a process pool that does the parse+flatten,
+    then bulk-inserts each completed batch's rows on the main process. A bounded
+    sliding window of in-flight batches (``workers * 2``) keeps every worker fed
+    while capping how much sits in memory at once, preserving the streaming, bounded
+    footprint of the serial path. Results are drained in submit order so progress is
+    monotonic.
+
+    The pool uses the ``spawn`` start method so workers never inherit the open DuckDB
+    handle (a forked live connection is unsafe); the one-time worker startup is
+    negligible against a multi-minute build.
+    """
+    max_inflight = workers * 2
+    inflight: deque[Future] = deque()
+    doc_count = eav_count = skipped = 0
+
+    def drain_one() -> None:
+        nonlocal doc_count, eav_count, skipped
+        docs_ipc, eav_ipc, sk = inflight.popleft().result()
+        doc_count += _insert_ipc(con, "docs", docs_ipc)
+        eav_count += _insert_ipc(con, "eav", eav_ipc)
+        skipped += sk
+        if on_progress:
+            on_progress(phase, doc_count, total)
+
+    ctx = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
+        for batch in _chunked(records, batch_size):
+            inflight.append(ex.submit(_flatten_batch, batch))
+            if len(inflight) >= max_inflight:
+                drain_one()
+        while inflight:
+            drain_one()
+
+    if on_progress:
+        on_progress(phase, doc_count, total)
+    return doc_count, eav_count, skipped
+
+
 def _create_indexes(con: duckdb.DuckDBPyConnection) -> None:
     """Indexes the corpus relies on for full-corpus and scoped queries.
 
@@ -280,6 +497,8 @@ def build_corpus(
     dataset: TIMDEXDataset,
     analyses_dir: str | os.PathLike[str],
     *,
+    workers: int | str | None = None,
+    batch_size: int | str | None = None,
     on_progress: OnProgress | None = None,
 ) -> dict[str, Any]:
     """(Re)build the corpus from every current record; return its meta row.
@@ -289,9 +508,14 @@ def build_corpus(
     counted under ``skipped_count``. Writes to a ``.building`` temp file and atomically
     renames it into place on success, so a failed build never leaves a half-written
     corpus (and never disturbs an existing one until it's done).
+
+    ``workers``/``batch_size`` tune the flatten fan-out (see :func:`_build_workers`);
+    callers pass the resolved Timmy config, ``None`` falls back to env/defaults, and
+    ``workers <= 1`` runs the original serial path.
     """
     analyses_dir = Path(analyses_dir)
     analyses_dir.mkdir(parents=True, exist_ok=True)
+    _raise_fd_limit()
 
     final_path = corpus_path(analyses_dir)
     building_path = final_path.with_suffix(".duckdb.building")
@@ -308,10 +532,18 @@ def build_corpus(
         records = dataset.records.read_dicts_iter(
             table="current_records", columns=CORPUS_READ_COLUMNS
         )
-        doc_count, eav_count, skipped = _ingest_records(
-            con, records, only_composites=None,
-            on_progress=on_progress, total=total, phase="flattening records",
-        )
+        n_workers = _build_workers(workers)
+        if n_workers > 1:
+            logger.info("Building corpus with %d flatten workers", n_workers)
+            doc_count, eav_count, skipped = _ingest_records_parallel(
+                con, records, workers=n_workers, batch_size=_build_batch_size(batch_size),
+                on_progress=on_progress, total=total, phase="flattening records",
+            )
+        else:
+            doc_count, eav_count, skipped = _ingest_records(
+                con, records, only_composites=None,
+                on_progress=on_progress, total=total, phase="flattening records",
+            )
 
         if on_progress:
             on_progress("indexing", doc_count, total)

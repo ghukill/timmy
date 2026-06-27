@@ -198,12 +198,15 @@ def report_fragment() -> str:
     )
 
 
-def _run_with_lock(fn, dataset, analyses_dir):
-    """Wrap a corpus build/update so it holds ``dataset_lock`` around the TDA reads."""
+def _run_with_lock(fn, dataset, analyses_dir, **kwargs):
+    """Wrap a corpus build/update so it holds ``dataset_lock`` around the TDA reads.
+
+    Extra ``kwargs`` pass through to ``fn`` (e.g. the build's worker/batch config).
+    """
 
     def runner(on_progress):
         with dataset_lock:
-            return fn(dataset, analyses_dir, on_progress=on_progress)
+            return fn(dataset, analyses_dir, on_progress=on_progress, **kwargs)
 
     return runner
 
@@ -212,7 +215,11 @@ def _run_with_lock(fn, dataset, analyses_dir):
 def build():
     """Kick off a (re)build of the whole corpus in the background, then show progress."""
     dataset = get_app_dataset()
-    runner = _run_with_lock(analysis.build_corpus, dataset, _analyses_dir())
+    runner = _run_with_lock(
+        analysis.build_corpus, dataset, _analyses_dir(),
+        workers=current_app.config["BUILD_WORKERS"],
+        batch_size=current_app.config["BUILD_BATCH_SIZE"],
+    )
     try:
         corpus_job.start("build", runner)
     except RuntimeError:

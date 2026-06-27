@@ -39,6 +39,12 @@ DEFAULT_ANALYSIS_DIR = str(USER_CONFIG_DIR / "analyses")
 DEFAULT_TRANSMOG_DIR = str(USER_CONFIG_DIR / "transmogrifier")
 DEFAULT_TRANSMOG_REPO_URL = "https://github.com/MITLibraries/transmogrifier"
 
+# Corpus-build parallelism (see timmy.analysis.corpus). The flatten fan-out helps up
+# to roughly the core count; 8 is plenty and we never oversubscribe a small box.
+# build_workers <= 1 selects the original serial path.
+DEFAULT_BUILD_WORKERS = min(8, os.cpu_count() or 8)
+DEFAULT_BUILD_BATCH_SIZE = 1000
+
 
 @dataclass(frozen=True)
 class Field:
@@ -58,6 +64,8 @@ FIELDS: tuple[Field, ...] = (
     Field("transmog_dir", "TIMMY_TRANSMOG_DIR", "TRANSMOG_DIR", DEFAULT_TRANSMOG_DIR),
     Field("transmog_repo_url", "TIMMY_TRANSMOG_REPO_URL", "TRANSMOG_REPO_URL", DEFAULT_TRANSMOG_REPO_URL),
     Field("log_level", "TIMMY_LOG_LEVEL", "LOG_LEVEL", "INFO"),
+    Field("build_workers", "TIMMY_BUILD_WORKERS", "BUILD_WORKERS", DEFAULT_BUILD_WORKERS),
+    Field("build_batch_size", "TIMMY_BUILD_BATCH", "BUILD_BATCH_SIZE", DEFAULT_BUILD_BATCH_SIZE),
 )
 
 _FIELDS_BY_NAME = {f.name: f for f in FIELDS}
