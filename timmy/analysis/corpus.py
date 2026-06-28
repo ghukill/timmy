@@ -30,7 +30,8 @@ import json
 import logging
 import multiprocessing
 import os
-from collections import deque
+import queue
+import threading
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Future, ProcessPoolExecutor
 from datetime import date, datetime, timezone
@@ -273,15 +274,18 @@ def _ingest_records(
 # plus a recursive flatten(), so a single Python thread pins one core while the rest
 # of the box sits idle (most visible on a many-core machine -- see the M2 vs i5
 # diagnosis). The work is embarrassingly parallel per record, so we fan the
-# parse+flatten across a process pool and keep the DuckDB writes on the main process
-# (one file, one writer). Network reads and DB inserts stay serial; only the CPU part
-# scales out.
+# parse+flatten across a process pool. The read and the DuckDB inserts each get their
+# own thread (see _ingest_records_parallel) so they overlap rather than take turns;
+# the inserts still run on a single thread (one file, one writer). Benchmarked against
+# rustfs, the pool is load-bearing: process parallelism makes flatten ~2.2x faster
+# end-to-end vs serial, where a *thread*-based flatten barely helps (the GIL).
 #
 # Tunables via env: TIMMY_BUILD_WORKERS (process count; default cpu_count-1) and
-# TIMMY_BUILD_BATCH (records per task). A batch is the IPC unit -- bigger amortizes
-# task overhead but raises peak per-worker memory and coarsens progress. 1000 keeps a
-# worker's working set small (~190 MiB in testing) at a negligible throughput cost.
-PARALLEL_BATCH = 1000
+# TIMMY_BUILD_BATCH (records per task). A batch is the IPC unit -- bigger amortizes the
+# per-task pickle/IPC overhead but raises peak per-worker memory and coarsens progress.
+# Throughput climbs steeply to ~4000 (a ~30% gain over the old 1000), then plateaus and
+# regresses past ~8000, so 4000 is the knee -- at roughly the memory a full build uses.
+PARALLEL_BATCH = 4000
 
 
 def _build_workers(override: int | str | None = None) -> int:
@@ -429,6 +433,10 @@ def _flatten_batch(records: list[dict[str, Any]]) -> tuple[bytes, bytes, int]:
     )
 
 
+# Sentinel marking the end of the reader's future stream (and, on abort, its exit).
+_DONE = object()
+
+
 def _ingest_records_parallel(
     con: duckdb.DuckDBPyConnection,
     records: Iterable[dict[str, Any]],
@@ -439,40 +447,84 @@ def _ingest_records_parallel(
     total: int | None,
     phase: str,
 ) -> tuple[int, int, int]:
-    """Parallel counterpart to ``_ingest_records`` for the full build.
+    """Parallel ingest with the read decoupled from the insert.
 
-    Streams ``records`` in batches into a process pool that does the parse+flatten,
-    then bulk-inserts each completed batch's rows on the main process. A bounded
-    sliding window of in-flight batches (``workers * 2``) keeps every worker fed
-    while capping how much sits in memory at once, preserving the streaming, bounded
-    footprint of the serial path. Results are drained in submit order so progress is
-    monotonic.
+    A dedicated reader thread streams ``records`` in batches, submits each to the
+    flatten pool, and enqueues the resulting future; *this* thread drains futures in
+    submit order and bulk-inserts them into ``con``. So the (now fast, rustfs-backed)
+    read overlaps the DuckDB insert instead of taking turns with it on one thread --
+    the flatten pool, which previously starved whenever the main thread was parked on
+    either stage, now stays continuously fed.
+
+    The bounded queue (``maxsize = workers * 2``) caps how many futures are
+    outstanding, so peak memory is bounded exactly as the old sliding window was, and
+    draining in submit order keeps progress monotonic. ``con`` is touched only by this
+    thread, so the single-writer DuckDB invariant holds; the reader only ever talks to
+    the pool and the queue.
 
     The pool uses the ``spawn`` start method so workers never inherit the open DuckDB
     handle (a forked live connection is unsafe); the one-time worker startup is
     negligible against a multi-minute build.
     """
     max_inflight = workers * 2
-    inflight: deque[Future] = deque()
-    doc_count = eav_count = skipped = 0
 
-    def drain_one() -> None:
-        nonlocal doc_count, eav_count, skipped
-        docs_ipc, eav_ipc, sk = inflight.popleft().result()
-        doc_count += _insert_ipc(con, "docs", docs_ipc)
-        eav_count += _insert_ipc(con, "eav", eav_ipc)
-        skipped += sk
-        if on_progress:
-            on_progress(phase, doc_count, total)
+    # Bounded hand-off: the reader puts futures, this thread gets them. A full queue
+    # blocks the reader -- which is what bounds peak memory.
+    fq: queue.Queue[Any] = queue.Queue(maxsize=max_inflight)
+    abort = threading.Event()
+    reader_box: list[BaseException] = []  # carries a reader-thread exception out
 
     ctx = multiprocessing.get_context("spawn")
+    doc_count = eav_count = skipped = 0
+
+    def _reader(ex: ProcessPoolExecutor) -> None:
+        """Read -> submit-to-pool -> enqueue future, until exhausted or aborted."""
+        try:
+            for batch in _chunked(records, batch_size):
+                if abort.is_set():
+                    return
+                fut: Future = ex.submit(_flatten_batch, batch)
+                # put() blocks when max_inflight futures are outstanding; the short
+                # timeout lets an abort break the wait instead of parking forever.
+                while not abort.is_set():
+                    try:
+                        fq.put(fut, timeout=0.5)
+                        break
+                    except queue.Full:
+                        continue
+        except BaseException as exc:  # noqa: BLE001 -- re-raised on the main thread
+            reader_box.append(exc)
+        finally:
+            fq.put(_DONE)
+
     with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
-        for batch in _chunked(records, batch_size):
-            inflight.append(ex.submit(_flatten_batch, batch))
-            if len(inflight) >= max_inflight:
-                drain_one()
-        while inflight:
-            drain_one()
+        reader = threading.Thread(target=_reader, args=(ex,), name="corpus-reader")
+        reader.start()
+        try:
+            while True:
+                item = fq.get()
+                if item is _DONE:
+                    break
+                docs_ipc, eav_ipc, sk = item.result()
+                doc_count += _insert_ipc(con, "docs", docs_ipc)
+                eav_count += _insert_ipc(con, "eav", eav_ipc)
+                skipped += sk
+                if on_progress:
+                    on_progress(phase, doc_count, total)
+        except BaseException:
+            # Tell the reader to stop, then drain until its sentinel so it can't
+            # deadlock parked on a full queue. Drained futures are discarded, not
+            # inserted.
+            abort.set()
+            while fq.get() is not _DONE:
+                pass
+            raise
+        finally:
+            reader.join()
+
+    # A read error (e.g. rustfs/TDA hiccup) surfaces here, after a clean join.
+    if reader_box:
+        raise reader_box[0]
 
     if on_progress:
         on_progress(phase, doc_count, total)
@@ -597,7 +649,8 @@ def update_corpus(
 ) -> dict[str, Any]:
     """Reconcile the corpus against the live dataset; return its updated meta row.
 
-    The diff is a composite-id set difference (see module docstring):
+    The dataset is refreshed first (see below), then the diff is a composite-id set
+    difference (see module docstring):
 
     - delete set = corpus composites absent from the live current_records;
     - insert set = live composites (non-delete) absent from the corpus.
@@ -610,6 +663,19 @@ def update_corpus(
     analyses_dir = Path(analyses_dir)
     if not corpus_exists(analyses_dir):
         raise FileNotFoundError(f"No corpus to update at {corpus_path(analyses_dir)}")
+
+    # TDA freezes ``current_records`` into a preload snapshot at dataset-load time, and
+    # the app loads the dataset once at startup -- so a long-running server's view goes
+    # stale: ETL runs that land after startup are invisible, and an update would diff
+    # against the startup snapshot and find nothing new. Refresh re-inits the dataset
+    # (re-attaching the metadata DB, re-globbing append deltas, rebuilding the
+    # ``current_records`` snapshot) so the reconcile diffs against the live dataset. The
+    # web caller holds ``dataset_lock`` around this whole call; a CLI run owns its own
+    # connection -- so re-initializing the shared connection here is safe either way.
+    if on_progress:
+        on_progress("refreshing dataset", 0, None)
+    logger.info("Refreshing dataset to pick up ETL runs added since it was loaded")
+    dataset.refresh()
 
     if on_progress:
         on_progress("scanning source keyset", 0, None)

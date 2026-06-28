@@ -74,6 +74,11 @@ class FakeDataset:
         self.metadata = _FakeMeta(records)
         self.location = location
 
+    def refresh(self):
+        """No-op: ``update_corpus`` refreshes the dataset before diffing, but this
+        stub's live set is already whatever was passed to the constructor (tests
+        simulate the next ETL state by constructing a new ``FakeDataset``)."""
+
 
 def rec(tid, run_id, offset, *, source="alma", action="index", title=None, when=None,
         run_date="2026-06-01", run_type="daily"):

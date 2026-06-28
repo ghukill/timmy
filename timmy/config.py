@@ -41,9 +41,11 @@ DEFAULT_TRANSMOG_REPO_URL = "https://github.com/MITLibraries/transmogrifier"
 
 # Corpus-build parallelism (see timmy.analysis.corpus). The flatten fan-out helps up
 # to roughly the core count; 8 is plenty and we never oversubscribe a small box.
-# build_workers <= 1 selects the original serial path.
+# build_workers <= 1 selects the original serial path. The batch size is the IPC unit:
+# benchmarked against a local rustfs dataset, throughput climbs to ~4000 records/task
+# (~30% over the old 1000) then plateaus, so 4000 is the default knee.
 DEFAULT_BUILD_WORKERS = min(8, os.cpu_count() or 8)
-DEFAULT_BUILD_BATCH_SIZE = 1000
+DEFAULT_BUILD_BATCH_SIZE = 4000
 
 
 @dataclass(frozen=True)
