@@ -15,6 +15,9 @@ Routes:
 - ``GET  /analysis/job``          progress page for a running build/update
 - ``GET  /analysis/job.json``     progress snapshot (polled by the progress page)
 - ``POST /analysis/query``        run read-only SQL (scoped to the subset if given)
+- ``GET  /analysis/sql``          the SQL console: schema reference + saved-query library
+- ``POST /analysis/sql/queries``  save (upsert) a named query
+- ``POST /analysis/sql/queries/delete``  delete a saved query
 - ``GET  /analysis/values``       path-scoped value table  (+ ``/values/data``)
 - ``GET  /analysis/object``       parent-object drill       (+ ``/object/data``)
 - ``GET  /analysis/records``      value -> records drill    (+ ``/records/data``)
@@ -39,6 +42,7 @@ from flask import (
 )
 
 from timmy import analysis
+from timmy.analysis import queries
 from timmy.analysis.corpus import REPORT_WARN_THRESHOLD
 from timmy.corpus_job import corpus_job
 from timmy.dataset import dataset_lock, get_app_dataset
@@ -289,6 +293,82 @@ def query():
         return jsonify(error=str(exc)), 400
     finally:
         conn.close()
+
+
+# --------------------------------------------------------------------------- #
+# SQL console (dedicated page): schema reference + saved-query library
+# --------------------------------------------------------------------------- #
+# Tables worth surfacing in the console's schema reference (corpus internals like
+# scope_report_cache are omitted -- they aren't useful to query directly).
+SCHEMA_TABLES = ["docs", "eav", "corpus_meta"]
+
+
+def _corpus_schema(conn) -> list[dict]:
+    """Introspect the queryable tables into ``[{table, columns:[{name,type}]}]``.
+
+    Read live from the corpus via ``DESCRIBE`` so it always matches the actual DB.
+    """
+    schema = []
+    for table in SCHEMA_TABLES:
+        rows = conn.execute(f"describe {table}").fetchall()
+        # DESCRIBE yields (column_name, column_type, null, key, default, extra).
+        columns = [{"name": r[0], "type": r[1]} for r in rows]
+        schema.append({"table": table, "columns": columns})
+    return schema
+
+
+@analysis_bp.get("/sql")
+def sql_console() -> str:
+    """The dedicated SQL console: schema reference, saved-query library, and editor.
+
+    Degrades to the empty state before a corpus exists. Scope params carry through so
+    queries run here can still be restricted to a subset (the editor posts them to
+    ``/analysis/query`` alongside the SQL).
+    """
+    analyses_dir = _analyses_dir()
+    if not analysis.corpus_exists(analyses_dir):
+        return render_template("analysis_empty.html", last_job=corpus_job.snapshot())
+
+    conn = _open()
+    try:
+        schema = _corpus_schema(conn)
+    finally:
+        conn.close()
+    scope_args = _scope_args(request.args)
+    return render_template(
+        "analysis_sql.html",
+        schema=schema,
+        saved_queries=queries.list_queries(analyses_dir),
+        scope_args=scope_args,
+        scope_qs=urlencode(scope_args),
+        scoped=bool(scope_args),
+        max_rows=MAX_QUERY_ROWS,
+    )
+
+
+@analysis_bp.post("/sql/queries")
+def save_query():
+    """Upsert a saved query; return the refreshed library so the dropdown updates."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        queries.save_query(
+            _analyses_dir(),
+            payload.get("name", ""),
+            payload.get("description", "") or "",
+            payload.get("sql", "") or "",
+            create=bool(payload.get("create")),
+        )
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    return jsonify(queries=queries.list_queries(_analyses_dir()))
+
+
+@analysis_bp.post("/sql/queries/delete")
+def delete_saved_query():
+    """Delete a saved query; return the refreshed library."""
+    payload = request.get_json(silent=True) or {}
+    queries.delete_query(_analyses_dir(), payload.get("name", ""))
+    return jsonify(queries=queries.list_queries(_analyses_dir()))
 
 
 # --------------------------------------------------------------------------- #

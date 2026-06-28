@@ -6,10 +6,6 @@
     <title>Timmy &mdash; Metadata corpus</title>
     <link
       rel="stylesheet"
-      href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css"
-    />
-    <link
-      rel="stylesheet"
       href="https://cdn.datatables.net/2.1.8/css/dataTables.dataTables.min.css"
     />
     <style>
@@ -119,49 +115,6 @@
         display: flex;
         gap: 0.5rem;
         align-items: center;
-      }
-      .examples {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.4rem;
-        margin: 0.75rem 0;
-      }
-      .examples button {
-        font-size: 0.75rem;
-        padding: 0.25rem 0.5rem;
-        cursor: pointer;
-      }
-      .CodeMirror {
-        border: 1px solid #ccc;
-        border-radius: 4px;
-        height: auto;
-        min-height: 220px;
-        font-size: 0.85rem;
-        resize: vertical;
-        overflow: auto;
-      }
-      .console-actions {
-        margin-top: 0.5rem;
-        display: flex;
-        gap: 0.5rem;
-        align-items: center;
-      }
-      #status {
-        font-size: 0.8rem;
-        color: #555;
-      }
-      #status.error {
-        color: #b00020;
-        font-family: ui-monospace, monospace;
-      }
-      #results-wrap {
-        margin-top: 1rem;
-      }
-      table#results th,
-      table#results td {
-        font-family: ui-monospace, monospace;
-        font-size: 0.8rem;
-        white-space: nowrap;
       }
       .empty {
         color: #999;
@@ -372,35 +325,19 @@
     </section>
 
     <section>
-      <h2>SQL console{% if scoped %} <span class="cov-count">(scoped)</span>{% endif %}</h2>
+      <h2>SQL console</h2>
       <p style="font-size: 0.85rem; color: #555">
         Read-only SQL over <code>eav</code>, <code>docs</code>, and
-        <code>corpus_meta</code>. Select <code>timdex_record_id</code> for clickable
-        links to each record. {% if scoped %}With a scope active,
-        <code>eav</code>/<code>docs</code> are restricted to the subset.{% endif %}
-        Results capped at {{ "{:,}".format(max_rows) }} rows.
+        <code>corpus_meta</code>, with a schema reference and a library of saved
+        queries.
+        <a href="{{ url_for('analysis.sql_console', **scope_args) }}">Open SQL console &rarr;</a>
       </p>
-      <div class="examples" id="examples"></div>
-      <textarea id="sql"></textarea>
-      <div class="console-actions">
-        <button type="button" id="run">Run</button>
-        <span id="status"></span>
-      </div>
-      <div id="results-wrap" style="display: none">
-        <table id="results" class="display" style="width: 100%"></table>
-      </div>
     </section>
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/sql/sql.min.js"></script>
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
     <script src="https://cdn.datatables.net/2.1.8/js/dataTables.min.js"></script>
     <script>
-      const QUERY_URL = "{{ url_for('analysis.query') }}";
-      const SCOPE = {{ scope_args | tojson }};
       const SCOPE_QS = {{ scope_qs | tojson }};
-      const RECORD_BASE =
-        "{{ url_for('main.records') }}".replace(/records$/, "record/");
 
       // Load the schema overview asynchronously: the dashboard renders instantly and
       // the (potentially slow, uncached) report fills in behind the spinner. The
@@ -431,151 +368,6 @@
               '<p class="empty">Could not load the schema overview: ' + e + "</p>";
           });
       })();
-
-      const EXAMPLES = {
-        "Field usage ranking":
-          "select path,\n" +
-          "       count(*) as occurrences,\n" +
-          "       count(distinct timdex_composite_id) as docs\n" +
-          "from eav\n" +
-          "group by path\n" +
-          "order by docs desc\n" +
-          "limit 50;",
-        "Coverage of a field":
-          "select count(distinct timdex_composite_id) as uses,\n" +
-          "       (select count(*) from docs) as total_docs\n" +
-          "from eav\n" +
-          "where path = 'contributors[].value';",
-        "Value distribution":
-          "select value, count(distinct timdex_composite_id) as docs\n" +
-          "from eav\n" +
-          "where path = 'contributors[].kind'\n" +
-          "group by value\n" +
-          "order by docs desc\n" +
-          "limit 50;",
-        "Records using a field":
-          "select d.timdex_record_id, d.run_id, d.run_record_offset,\n" +
-          "       d.source, e.value\n" +
-          "from eav e join docs d using (timdex_composite_id)\n" +
-          "where e.path = 'contributors[].value'\n" +
-          "limit 100;",
-      };
-
-      const editor = CodeMirror.fromTextArea(document.getElementById("sql"), {
-        mode: "text/x-sql",
-        lineNumbers: true,
-        lineWrapping: true,
-      });
-
-      const exampleBar = document.getElementById("examples");
-      Object.keys(EXAMPLES).forEach((name, i) => {
-        const b = document.createElement("button");
-        b.type = "button";
-        b.textContent = name;
-        b.addEventListener("click", () => editor.setValue(EXAMPLES[name]));
-        exampleBar.appendChild(b);
-        if (i === 0) editor.setValue(EXAMPLES[name]);
-      });
-
-      const statusEl = document.getElementById("status");
-      const wrap = document.getElementById("results-wrap");
-      const resultsTable = document.getElementById("results");
-      let dt = null;
-
-      function currentRecordHref(id) {
-        // Corpus is over current_records, so a bare id links to the current form.
-        return (
-          RECORD_BASE +
-          encodeURIComponent(id) +
-          (SCOPE_QS ? "?" + SCOPE_QS : "")
-        );
-      }
-      function recordHref(id, runId, offset) {
-        return (
-          RECORD_BASE +
-          encodeURIComponent(id) +
-          "/" +
-          encodeURIComponent(runId) +
-          "/" +
-          encodeURIComponent(offset) +
-          (SCOPE_QS ? "?" + SCOPE_QS : "")
-        );
-      }
-
-      function render(payload) {
-        const { columns, rows, truncated, row_count } = payload;
-        if (dt) {
-          dt.destroy();
-          dt = null;
-        }
-        resultsTable.innerHTML = "";
-
-        const idIdx = columns.indexOf("timdex_record_id");
-        const runIdx = columns.indexOf("run_id");
-        const offIdx = columns.indexOf("run_record_offset");
-        const hasFullKey = idIdx !== -1 && runIdx !== -1 && offIdx !== -1;
-        const linkId = idIdx !== -1;
-
-        const cols = columns.map((name, i) => {
-          if (linkId && i === idIdx) {
-            return {
-              title: name,
-              render: function (data, type, row) {
-                if (type !== "display" || data === null) return data;
-                const a = document.createElement("a");
-                a.href = hasFullKey
-                  ? recordHref(data, row[runIdx], row[offIdx])
-                  : currentRecordHref(data);
-                a.textContent = data;
-                return a.outerHTML;
-              },
-            };
-          }
-          return { title: name, render: DataTable.render.text() };
-        });
-
-        wrap.style.display = "";
-        dt = new DataTable(resultsTable, {
-          data: rows,
-          columns: cols,
-          deferRender: true,
-          order: [],
-          scrollX: true,
-          pageLength: 25,
-          lengthMenu: [10, 25, 50, 100],
-        });
-
-        statusEl.classList.remove("error");
-        statusEl.textContent =
-          `${row_count} row(s)` + (truncated ? ` (capped at {{ max_rows }})` : "");
-      }
-
-      async function run() {
-        const sql = editor.getValue().trim();
-        if (!sql) return;
-        statusEl.classList.remove("error");
-        statusEl.textContent = "Running…";
-        try {
-          const resp = await fetch(QUERY_URL, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(Object.assign({ sql }, SCOPE)),
-          });
-          const payload = await resp.json();
-          if (!resp.ok) {
-            statusEl.classList.add("error");
-            statusEl.textContent = payload.error || "Query failed.";
-            return;
-          }
-          render(payload);
-        } catch (err) {
-          statusEl.classList.add("error");
-          statusEl.textContent = String(err);
-        }
-      }
-
-      document.getElementById("run").addEventListener("click", run);
-      editor.setOption("extraKeys", { "Ctrl-Enter": run, "Cmd-Enter": run });
     </script>
   </body>
 </html>

@@ -56,8 +56,13 @@
     >Sources</a
   >
   <a
-    class="navlink {{ 'active' if request.blueprint == 'analysis' }}"
+    class="navlink {{ 'active' if request.blueprint == 'analysis' and request.endpoint != 'analysis.sql_console' }}"
     href="{{ url_for('analysis.index') }}"
     >Analysis</a
+  >
+  <a
+    class="navlink {{ 'active' if request.endpoint == 'analysis.sql_console' }}"
+    href="{{ url_for('analysis.sql_console') }}"
+    >SQL</a
   >
 </nav>
