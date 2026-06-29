@@ -133,7 +133,21 @@
       </tbody>
     </table>
 
-    {% if show_record_shape %}
+    <h2 class="sub">Objects</h2>
+    {% endif %}
+
+    <table id="object" class="display" style="width: 100%">
+      <thead>
+        <tr>
+          <th>record</th>
+          {% for col in columns %}
+          <th>{{ col.label }}</th>
+          {% endfor %}
+        </tr>
+      </thead>
+    </table>
+
+    {% if member_stats and show_record_shape %}
     <h2 class="sub">By record</h2>
     <p class="lead">
       One row per record carrying this field: how many objects it has
@@ -153,20 +167,6 @@
       </thead>
     </table>
     {% endif %}
-
-    <h2 class="sub">Objects</h2>
-    {% endif %}
-
-    <table id="object" class="display" style="width: 100%">
-      <thead>
-        <tr>
-          <th>record</th>
-          {% for col in columns %}
-          <th>{{ col.label }}</th>
-          {% endfor %}
-        </tr>
-      </thead>
-    </table>
 
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
     <script src="https://cdn.datatables.net/2.1.8/js/dataTables.min.js"></script>
