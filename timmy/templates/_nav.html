@@ -65,4 +65,9 @@
     href="{{ url_for('analysis.sql_console') }}"
     >SQL</a
   >
+  <a
+    class="navlink {{ 'active' if request.blueprint == 'dataset' }}"
+    href="{{ url_for('dataset.index') }}"
+    >Dataset</a
+  >
 </nav>

@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Timmy &mdash; Dataset management</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 2rem auto;
+        width: 90%;
+        max-width: 880px;
+      }
+      h1 {
+        font-size: 1.3rem;
+        margin-bottom: 0.25rem;
+      }
+      .lede {
+        color: #555;
+        font-size: 0.9rem;
+        margin: 0 0 0.5rem;
+      }
+      .location {
+        font-family: ui-monospace, monospace;
+        font-size: 0.82rem;
+        color: #2c4a6e;
+        background: #eef3f9;
+        border: 1px solid #d8e2ee;
+        border-radius: 5px;
+        padding: 0.35rem 0.6rem;
+        display: inline-block;
+        word-break: break-all;
+      }
+      /* Banner shown while a job is running or after the last one finished. */
+      .banner {
+        margin-top: 1.25rem;
+        border-radius: 6px;
+        padding: 0.6rem 0.9rem;
+        font-size: 0.85rem;
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+      }
+      .banner.running {
+        background: #fff7e6;
+        border: 1px solid #f0d8a8;
+        color: #7a5a14;
+      }
+      .banner.done {
+        background: #edf7f0;
+        border: 1px solid #bfe0c9;
+        color: #2e6b45;
+      }
+      .banner.failed {
+        background: #fdeef0;
+        border: 1px solid #e0b4bc;
+        color: #b00020;
+      }
+      .banner a {
+        color: inherit;
+        font-weight: 600;
+      }
+      /* Action cards -- one per maintenance action; more get appended here. */
+      .actions {
+        margin-top: 1.5rem;
+        display: grid;
+        gap: 1rem;
+      }
+      .card {
+        border: 1px solid #d8e2ee;
+        background: #f8fafd;
+        border-radius: 8px;
+        padding: 1.1rem 1.25rem;
+      }
+      .card h2 {
+        font-size: 1.02rem;
+        margin: 0 0 0.35rem;
+        color: #2c4a6e;
+      }
+      .card p {
+        margin: 0.35rem 0;
+        font-size: 0.86rem;
+        color: #444;
+        line-height: 1.45;
+      }
+      .card .warn {
+        color: #8a4b00;
+      }
+      .card-foot {
+        margin-top: 0.9rem;
+      }
+      button.run {
+        font-size: 0.85rem;
+        padding: 0.45rem 0.95rem;
+        background: #2c4a6e;
+        color: #fff;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+      }
+      button.run:hover {
+        background: #24405f;
+      }
+    </style>
+  </head>
+  <body>
+    {% include "_nav.html" %}
+    <h1>Dataset management</h1>
+    <p class="lede">Maintenance actions that operate on the dataset itself.</p>
+    <span class="location">{{ location }}</span>
+
+    {% if job.running %}
+      <div class="banner running">
+        <span>&#9881;&#65039; <strong>{{ job.title }}</strong> is running&hellip;</span>
+        <a href="{{ url_for('dataset.job_page') }}">View progress &rarr;</a>
+      </div>
+    {% elif job.finished and job.error %}
+      <div class="banner failed">
+        <span>Last action ({{ job.title }}) <strong>failed</strong>.</span>
+        <a href="{{ url_for('dataset.job_page') }}">See details &rarr;</a>
+      </div>
+    {% elif job.finished %}
+      <div class="banner done">
+        <span>
+          Last action ({{ job.title }}) completed
+          {%- if job.elapsed is not none %} in {{ job.elapsed }}s{% endif %}.
+        </span>
+        <a href="{{ url_for('dataset.job_page') }}">See details &rarr;</a>
+      </div>
+    {% endif %}
+
+    <div class="actions">
+      <div class="card">
+        <h2>Rebuild dataset metadata</h2>
+        <p>
+          Fully rebuilds the dataset's static metadata database by scanning every
+          data type's parquet files (records, embeddings, fulltexts). Use this after a
+          bulk load or when the metadata looks stale or out of sync with the records.
+        </p>
+        <p class="warn">
+          &#9888;&#65039; This <strong>writes to the dataset</strong>: it clears the
+          append deltas and overwrites the canonical <code>metadata.duckdb</code>. On a
+          large dataset it can take several minutes.
+        </p>
+        <div class="card-foot">
+          <form
+            method="POST"
+            action="{{ url_for('dataset.rebuild_metadata') }}"
+            onsubmit="return confirm('Rebuild the dataset metadata?\n\nThis clears the append deltas and overwrites the canonical metadata database (metadata.duckdb) for:\n{{ location }}\n\nIt can take several minutes and cannot be undone.');"
+          >
+            <button type="submit" class="run" {{ 'disabled' if job.running }}>
+              {{ 'Rebuild in progress…' if job.running else 'Rebuild metadata' }}
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

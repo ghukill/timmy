@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Timmy &mdash; Dataset job</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 2rem auto;
+        width: 90%;
+        max-width: 720px;
+      }
+      h1 {
+        font-size: 1.3rem;
+      }
+      .card {
+        margin-top: 1.5rem;
+        border: 1px solid #d8e2ee;
+        background: #f8fafd;
+        border-radius: 8px;
+        padding: 1.5rem;
+      }
+      .phase {
+        font-size: 1rem;
+        font-weight: 600;
+        color: #2c4a6e;
+      }
+      .bar {
+        margin-top: 1rem;
+        height: 14px;
+        background: #e6edf5;
+        border-radius: 7px;
+        overflow: hidden;
+      }
+      .bar-fill {
+        height: 100%;
+        width: 0%;
+        background: #7aa7d8;
+        transition: width 0.4s ease;
+      }
+      .bar-fill.indeterminate {
+        width: 35%;
+        animation: slide 1.2s ease-in-out infinite alternate;
+      }
+      @keyframes slide {
+        from { margin-left: 0; }
+        to { margin-left: 65%; }
+      }
+      .meta {
+        margin-top: 0.8rem;
+        font-size: 0.85rem;
+        color: #555;
+        font-family: ui-monospace, monospace;
+      }
+      .done {
+        color: #2e7d4f;
+        font-weight: 600;
+      }
+      .error {
+        color: #b00020;
+        font-family: ui-monospace, monospace;
+        white-space: pre-wrap;
+      }
+      table.tables {
+        margin-top: 1rem;
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 0.82rem;
+      }
+      table.tables th,
+      table.tables td {
+        text-align: left;
+        padding: 0.3rem 0.6rem;
+        border-bottom: 1px solid #e3e9f1;
+        font-family: ui-monospace, monospace;
+      }
+      table.tables th {
+        color: #444;
+      }
+      td.num {
+        text-align: right;
+      }
+      .status-built { color: #2e7d4f; }
+      .status-skipped { color: #8a6d00; }
+      .status-unknown { color: #888; }
+      a.cta {
+        display: inline-block;
+        margin-top: 1.2rem;
+        font-size: 0.9rem;
+        padding: 0.5rem 1rem;
+        background: #2c4a6e;
+        color: #fff;
+        border-radius: 5px;
+        text-decoration: none;
+      }
+    </style>
+  </head>
+  <body>
+    {% include "_nav.html" %}
+    <h1 id="title">Dataset job</h1>
+
+    <div class="card">
+      <div class="phase" id="phase">Starting…</div>
+      <div class="bar"><div class="bar-fill indeterminate" id="fill"></div></div>
+      <div class="meta" id="meta"></div>
+      <div id="outcome"></div>
+    </div>
+
+    <script>
+      const JOB_URL = "{{ url_for('dataset.job_json') }}";
+      const HOME_URL = "{{ url_for('dataset.index') }}";
+      const titleEl = document.getElementById("title");
+      const phaseEl = document.getElementById("phase");
+      const fillEl = document.getElementById("fill");
+      const metaEl = document.getElementById("meta");
+      const outcomeEl = document.getElementById("outcome");
+
+      function fmt(n) {
+        return n === null || n === undefined ? "?" : n.toLocaleString();
+      }
+
+      function tablesHtml(tables) {
+        if (!tables || !tables.length) return "";
+        const rows = tables
+          .map(
+            (t) =>
+              `<tr><td>${t.name}</td>` +
+              `<td class="status-${t.status}">${t.status}</td>` +
+              `<td class="num">${t.rows === null || t.rows === undefined ? "—" : fmt(t.rows)}</td></tr>`
+          )
+          .join("");
+        return (
+          '<table class="tables"><thead><tr>' +
+          "<th>data type</th><th>status</th><th class=\"num\">rows</th>" +
+          "</tr></thead><tbody>" + rows + "</tbody></table>"
+        );
+      }
+
+      async function poll() {
+        let s;
+        try {
+          s = await (await fetch(JOB_URL)).json();
+        } catch (e) {
+          metaEl.textContent = "Lost contact with the server…";
+          setTimeout(poll, 2000);
+          return;
+        }
+
+        const title = s.title || "Dataset job";
+        titleEl.textContent = title;
+        phaseEl.textContent = (s.phase || "working") + (s.running ? "…" : "");
+
+        if (s.total && s.done !== null) {
+          const pct = Math.min(100, Math.round((100 * s.done) / s.total));
+          fillEl.classList.remove("indeterminate");
+          fillEl.style.width = pct + "%";
+          metaEl.textContent =
+            `${fmt(s.done)} / ${fmt(s.total)} (${pct}%) · ${fmt(s.elapsed)}s elapsed`;
+        } else {
+          fillEl.classList.add("indeterminate");
+          metaEl.textContent = `${fmt(s.elapsed)}s elapsed`;
+        }
+
+        if (!s.running && s.finished) {
+          fillEl.classList.remove("indeterminate");
+          if (s.error) {
+            phaseEl.innerHTML = '<span class="error">Failed</span>';
+            outcomeEl.innerHTML =
+              '<p class="error">' + s.error + "</p>" +
+              '<a class="cta" href="' + HOME_URL + '">Back to dataset</a>';
+          } else {
+            fillEl.style.width = "100%";
+            phaseEl.innerHTML = '<span class="done">Done</span>';
+            const r = s.result || {};
+            metaEl.textContent =
+              `${title} complete · ${fmt(r.table_count)} data types · ${fmt(s.elapsed)}s`;
+            outcomeEl.innerHTML =
+              tablesHtml(r.tables) +
+              '<a class="cta" href="' + HOME_URL + '">Back to dataset →</a>';
+          }
+          return; // stop polling
+        }
+        setTimeout(poll, 1000);
+      }
+      poll();
+    </script>
+  </body>
+</html>
