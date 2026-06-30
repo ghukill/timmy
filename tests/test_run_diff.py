@@ -40,9 +40,12 @@ class _Records:
 
     def __init__(self, conn: duckdb.DuckDBPyConnection):
         self.conn = conn
+        # (run_id, where) of every read, so tests can assert how reads are scoped.
+        self.queries: list[tuple[str | None, str | None]] = []
 
     def read_dicts_iter(self, table="records", run_id=None, columns=None,
                         where=None, **filters):
+        self.queries.append((run_id, where))
         cols = columns or [
             "timdex_record_id", "run_id", "run_record_offset",
             "action", "transformed_record",
@@ -73,15 +76,15 @@ class FakeDataset:
             "create table metadata.records("
             "timdex_record_id text, source text, run_type text, run_date date, "
             "run_timestamp timestamp, action text, run_id text, "
-            "run_record_offset bigint, transformed_record text)"
+            "run_record_offset bigint, filename text, transformed_record text)"
         )
         self.conn.executemany(
-            "insert into metadata.records values (?,?,?,?,?,?,?,?,?)",
+            "insert into metadata.records values (?,?,?,?,?,?,?,?,?,?)",
             [
                 (
                     v["tid"], "alma", "daily", TS[v["run"]].date(),
                     TS[v["run"]], v.get("action", "index"), v["run"],
-                    v["off"],
+                    v["off"], v["file"],
                     None if v.get("payload") is None else json.dumps(v["payload"]),
                 )
                 for v in versions
@@ -90,10 +93,17 @@ class FakeDataset:
         self.records = _Records(self.conn)
 
 
-def ver(tid, run, off, payload="__none__", action="index"):
-    """One record version row. ``payload`` defaults to no-payload (a delete)."""
+def ver(tid, run, off, payload="__none__", action="index", file=None):
+    """One record version row. ``payload`` defaults to no-payload (a delete).
+
+    ``file`` is the physical parquet file the version lives in; it defaults to one
+    file per run (the common case). Pass it explicitly to place versions of the same
+    run in different files -- needed to exercise per-file offset collisions, since
+    ``run_record_offset`` restarts at 0 in each file.
+    """
     row = {"tid": tid, "run": run, "off": off, "action": action}
     row["payload"] = None if payload == "__none__" else payload
+    row["file"] = file or f"{run}-0.parquet"
     return row
 
 
@@ -199,6 +209,43 @@ def test_records_detail_rows():
     # The default report omits the (potentially huge) detail list.
     assert "records_detail" not in run_diff.diff_run(_scenario(), "X")
     print("  ok: per-record detail rows (status, prior key/date, changed paths)")
+
+
+def _collision_scenario() -> FakeDataset:
+    """Two records whose prior versions sit at the SAME run_record_offset but in
+    DIFFERENT files of the same prior run -- the per-file offset collision the
+    grouping must respect (offset restarts at 0 in every file, so a run-wide offset
+    filter would re-scan every file)."""
+    return FakeDataset([
+        # one prior run, two files, both reusing offset 10
+        ver("R7", "old1", 10, {"title": "seven-prior"}, file="old1-a.parquet"),
+        ver("R8", "old1", 10, {"title": "eight-prior"}, file="old1-b.parquet"),
+        # X modifies both
+        ver("R7", "X", 0, {"title": "seven-new"}),
+        ver("R8", "X", 1, {"title": "eight-new"}),
+    ])
+
+
+def test_prior_reads_are_file_scoped():
+    """Prior-version reads are scoped to a single physical file, so colliding offsets
+    across a run's files stay a needle pull instead of re-scanning every file."""
+    ds = _collision_scenario()
+    report = run_diff.diff_run(ds, "X", include_records=True)
+
+    # Correctness: each record diffed against ITS OWN file's prior, despite sharing
+    # offset 10 in run old1.
+    detail = {r["record_id"]: r for r in report["records_detail"]}
+    assert report["records"]["modified"] == 2, report["records"]
+    assert detail["R7"]["changed_paths"] == ["title"], detail["R7"]
+    assert detail["R8"]["changed_paths"] == ["title"], detail["R8"]
+
+    # Behaviour: every prior-side read (the ones with a raw where) names a single
+    # file -- two files means two scoped reads, not one run-wide offset scan.
+    prior_wheres = [w for _run, w in ds.records.queries if w]
+    assert prior_wheres, "expected prior-version reads to issue a where"
+    assert all("filename =" in w for w in prior_wheres), prior_wheres
+    assert len(prior_wheres) == 2, prior_wheres
+    print("  ok: prior reads scoped per file (offset collisions don't re-scan)")
 
 
 def test_run_meta_counts_and_unknown():

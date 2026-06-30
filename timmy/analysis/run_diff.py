@@ -115,13 +115,17 @@ def _touched(dataset: TIMDEXDataset, run_id: str) -> dict[str, tuple[str, int]]:
 
 
 def _prior_meta(dataset: TIMDEXDataset, run_id: str) -> dict[str, dict[str, Any]]:
-    """``timdex_record_id -> {run_id, offset, run_date}`` for the prior version.
+    """``timdex_record_id -> {run_id, offset, filename, run_date}`` for the prior version.
 
     For each record X touched, the single newest version strictly older than X
-    (by ``run_timestamp``, tie-broken by run_id/offset for determinism). Records
-    with no earlier version -- brand new at X -- are simply absent. Metadata-only;
-    the heavy payload read happens later, against exactly these keys. ``run_date``
-    feeds the table's "previous run" column; the key pins the diff's left side.
+    (by ``run_timestamp``, tie-broken by run_id/offset/filename for determinism).
+    Records with no earlier version -- brand new at X -- are simply absent.
+    Metadata-only; the heavy payload read happens later, against exactly these keys.
+    ``filename`` pins the *physical file* the prior version lives in -- essential
+    because ``run_record_offset`` is only a per-file row index (it restarts at 0 in
+    every file of a run), so the later payload read must scope by filename, not just
+    run_id, to stay a needle pull (see :func:`_read_prior_fields`). ``run_date`` feeds
+    the table's "previous run" column; the key pins the diff's left side.
     """
     rows = dataset.conn.execute(
         """
@@ -133,25 +137,27 @@ def _prior_meta(dataset: TIMDEXDataset, run_id: str) -> dict[str, dict[str, Any]
                 r.timdex_record_id,
                 r.run_id,
                 r.run_record_offset,
+                r.filename,
                 cast(r.run_date as date)::varchar as run_date,
                 row_number() over (
                     partition by r.timdex_record_id
                     order by r.run_timestamp desc nulls last,
                              r.run_id desc nulls last,
-                             r.run_record_offset desc nulls last
+                             r.run_record_offset desc nulls last,
+                             r.filename desc nulls last
                 ) as rn
             from metadata.records r
             join touched t using (timdex_record_id), x
             where r.run_timestamp < x.ts
         )
-        select timdex_record_id, run_id, run_record_offset, run_date
+        select timdex_record_id, run_id, run_record_offset, filename, run_date
         from prior where rn = 1
         """,
         [run_id, run_id],
     ).fetchall()
     return {
-        tid: {"run_id": prid, "offset": off, "run_date": rd}
-        for tid, prid, off, rd in rows
+        tid: {"run_id": prid, "offset": off, "filename": fn, "run_date": rd}
+        for tid, prid, off, fn, rd in rows
     }
 
 
@@ -198,24 +204,33 @@ def _read_prior_fields(
     """Read + flatten the assembled prior versions: ``timdex_record_id -> RecordFields``.
 
     The prior versions are scattered across many earlier runs, so reads are grouped
-    by ``run_id`` and narrowed to just the needed ``run_record_offset``s -- exactly
-    the prior payloads, nothing more (a prior full-ingest run isn't dragged in
-    wholesale). A prior version that was itself a delete yields no content, which
-    correctly reads as "no prior state" for that record.
+    by ``(run_id, filename)`` -- one read per *physical file* -- and narrowed to just
+    that file's needed ``run_record_offset``s, so the read stays a true needle pull
+    (a prior full-ingest run isn't dragged in wholesale).
+
+    Scoping by filename, not just run_id, is what keeps it a needle pull:
+    ``run_record_offset`` restarts at 0 in every file of a run, so a run-wide
+    ``offset in (...)`` predicate would match that offset's row group in *every* file
+    of the run -- a multi-file prior run (e.g. a full ingest spanning dozens of files)
+    would then re-scan the same row groups across all of them. Per file the offsets
+    are unique and row-group-clustered, so DuckDB prunes to exactly the needed groups.
+    A prior version that was itself a delete yields no content, which correctly reads
+    as "no prior state" for that record.
     """
-    by_run: dict[str, list[int]] = defaultdict(list)
+    by_file: dict[tuple[str, str], list[int]] = defaultdict(list)
     for meta in prior_meta.values():
-        by_run[meta["run_id"]].append(meta["offset"])
+        by_file[(meta["run_id"], meta["filename"])].append(meta["offset"])
 
     out: dict[str, RecordFields] = {}
-    for prev_run_id, offsets in by_run.items():
+    for (prev_run_id, filename), offsets in by_file.items():
+        file_pred = f"""filename = '{filename.replace("'", "''")}'"""
         for chunk in _chunks(offsets, _OFFSET_CHUNK):
             in_list = ", ".join(str(o) for o in chunk)
             for rec in dataset.records.read_dicts_iter(
                 table="records",
                 run_id=prev_run_id,
                 columns=["timdex_record_id", "run_record_offset", "transformed_record"],
-                where=f"run_record_offset in ({in_list})",
+                where=f"{file_pred} and run_record_offset in ({in_list})",
             ):
                 payload = rec.get("transformed_record")
                 if payload:
