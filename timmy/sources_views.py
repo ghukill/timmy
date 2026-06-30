@@ -103,15 +103,26 @@ def runs_data():
     length = request.args.get("length", default=25, type=int)
     length = min(max(length, 1), MAX_PAGE_LENGTH)
 
+    # Resolve the sort column by the DataTables column's *data field name*
+    # (``columns[i][data]``), not its positional index: the runs table has a
+    # synthetic, data-less "Diff" button column, so client column indices no longer
+    # line up with RUN_COLUMNS. Validating the name against RUN_COLUMNS also keeps it
+    # out of the SQL (never user-controlled).
     order_col_idx = request.args.get("order[0][column]", default=0, type=int)
-    if 0 <= order_col_idx < len(RUN_COLUMNS):
-        order_col = RUN_COLUMNS[order_col_idx]
-    else:
-        order_col = RUN_COLUMNS[0]
+    order_field = request.args.get(
+        f"columns[{order_col_idx}][data]", default="", type=str
+    )
+    order_col = order_field if order_field in RUN_COLUMNS else "run_timestamp"
     order_dir = "desc" if request.args.get("order[0][dir]") == "desc" else "asc"
 
     where_sql, params = _build_where(request.args)
     columns_sql = ", ".join(RUN_COLUMNS)
+
+    # Sub-sort by run_timestamp (the most granular key) then run_id, so rows with an
+    # equal primary key keep a stable, deterministic order across pages.
+    tiebreaks = [c for c in (f"run_timestamp {order_dir}", "run_id desc")
+                 if not c.startswith(order_col + " ")]
+    order_sql = ", ".join([f"{order_col} {order_dir}", *tiebreaks])
 
     try:
         with dataset_lock:
@@ -127,7 +138,7 @@ def runs_data():
             rows = conn.execute(
                 f"with {RUNS_CTE} "  # noqa: S608
                 f"select {columns_sql} from runs{where_sql} "
-                f"order by {order_col} {order_dir} "
+                f"order by {order_sql} "
                 f"limit ? offset ?",
                 [*params, length, start],
             ).fetchall()

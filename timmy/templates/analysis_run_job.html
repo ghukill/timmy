@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Timmy &mdash; Computing run analysis {{ run_id }}</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 2rem auto;
+        width: 90%;
+        max-width: 720px;
+        color: #1d2b3a;
+      }
+      h1 {
+        font-size: 1.25rem;
+        margin-bottom: 0.2rem;
+      }
+      h1 code {
+        font-size: 1rem;
+        background: #f3f3f3;
+        padding: 0.1rem 0.4rem;
+        border-radius: 4px;
+      }
+      p.lead {
+        font-size: 0.85rem;
+        color: #555;
+        margin-top: 0.2rem;
+      }
+      .card {
+        margin-top: 1.5rem;
+        border: 1px solid #d8e2ee;
+        background: #f8fafd;
+        border-radius: 8px;
+        padding: 1.5rem;
+      }
+      .phase {
+        font-size: 1rem;
+        font-weight: 600;
+        color: #2c4a6e;
+      }
+      .bar {
+        margin-top: 1rem;
+        height: 14px;
+        background: #e6edf5;
+        border-radius: 7px;
+        overflow: hidden;
+      }
+      .bar-fill {
+        height: 100%;
+        width: 0%;
+        background: #7aa7d8;
+        transition: width 0.4s ease;
+      }
+      .bar-fill.indeterminate {
+        width: 35%;
+        animation: slide 1.2s ease-in-out infinite alternate;
+      }
+      @keyframes slide {
+        from { margin-left: 0; }
+        to { margin-left: 65%; }
+      }
+      .meta {
+        margin-top: 0.8rem;
+        font-size: 0.85rem;
+        color: #555;
+        font-family: ui-monospace, monospace;
+      }
+      .error {
+        color: #b00020;
+        font-family: ui-monospace, monospace;
+        white-space: pre-wrap;
+      }
+      a.cta {
+        display: inline-block;
+        margin-top: 1.2rem;
+        font-size: 0.9rem;
+        padding: 0.5rem 1rem;
+        background: #2c4a6e;
+        color: #fff;
+        border-radius: 5px;
+        text-decoration: none;
+      }
+    </style>
+  </head>
+  <body>
+    {% include "_nav.html" %}
+
+    <h1>Run analysis: <code>{{ run_id }}</code></h1>
+    {% if meta %}
+    <p class="lead">
+      {{ meta.source }} &middot; {{ meta.run_type }} &middot; {{ meta.run_date }}
+      &middot; {{ meta.record_count }} actions
+      ({{ meta.index_count }} index, {{ meta.delete_count }} delete)
+    </p>
+    {% endif %}
+
+    <div class="card">
+      <div class="phase" id="phase">Starting…</div>
+      <div class="bar"><div class="bar-fill indeterminate" id="fill"></div></div>
+      <div class="meta" id="meta">
+        Diffing every record this run touched against its previous version. Large
+        runs can take a moment; the result is cached, so revisiting is instant.
+      </div>
+      <div id="outcome"></div>
+    </div>
+
+    <script>
+      const STATUS_URL =
+        "{{ url_for('analysis.run_status', run_id=run_id) }}";
+      // Reloading this same page hits the now-warm cache and renders the result.
+      const RESULT_URL = "{{ url_for('analysis.run_page', run_id=run_id) }}";
+
+      const phaseEl = document.getElementById("phase");
+      const fillEl = document.getElementById("fill");
+      const metaEl = document.getElementById("meta");
+      const outcomeEl = document.getElementById("outcome");
+
+      // diff_run reports three coarse phases; map them to a stepped bar so there is
+      // forward motion even though each phase is itself indeterminate.
+      const STEPS = {
+        "reading run records": 25,
+        "resolving previous versions": 60,
+        "computing diff": 90,
+      };
+
+      async function poll() {
+        let s;
+        try {
+          s = await (await fetch(STATUS_URL)).json();
+        } catch (e) {
+          metaEl.textContent = "Lost contact with the server…";
+          setTimeout(poll, 2000);
+          return;
+        }
+
+        phaseEl.textContent = (s.phase || "working") + (s.running ? "…" : "");
+        const pct = STEPS[s.phase];
+        if (pct) {
+          fillEl.classList.remove("indeterminate");
+          fillEl.style.width = pct + "%";
+        } else {
+          fillEl.classList.add("indeterminate");
+        }
+
+        if (s.finished) {
+          if (s.error) {
+            fillEl.classList.remove("indeterminate");
+            phaseEl.innerHTML = '<span class="error">Failed</span>';
+            outcomeEl.innerHTML = '<p class="error">' + s.error + "</p>";
+          } else {
+            fillEl.classList.remove("indeterminate");
+            fillEl.style.width = "100%";
+            phaseEl.textContent = "Done";
+            window.location.href = RESULT_URL;
+          }
+          return; // stop polling
+        }
+        setTimeout(poll, 1000);
+      }
+      poll();
+    </script>
+  </body>
+</html>

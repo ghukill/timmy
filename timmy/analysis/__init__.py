@@ -25,6 +25,10 @@ from timmy.analysis.flatten import (
     flatten_record,
     make_timdex_composite_id,
 )
+from timmy.analysis.run_diff import (
+    diff_run,
+    run_meta,
+)
 from timmy.analysis.scope import (
     EMPTY_SCOPE,
     SCOPE_COLUMNS,
@@ -58,8 +62,10 @@ __all__ = [
     "corpus_exists",
     "corpus_path",
     "delete_corpus",
+    "diff_run",
     "field_usage_report",
     "make_scope",
+    "run_meta",
     "open_corpus",
     "read_corpus_meta",
     "scoped",

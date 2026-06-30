@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Timmy &mdash; Run analysis {{ report.run_id }}</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.datatables.net/2.1.8/css/dataTables.dataTables.min.css"
+    />
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 2rem auto;
+        width: 90%;
+        color: #1d2b3a;
+      }
+      a.back {
+        font-size: 0.85rem;
+      }
+      h1 {
+        font-size: 1.25rem;
+        margin-bottom: 0.2rem;
+      }
+      h1 code {
+        font-size: 1rem;
+        background: #f3f3f3;
+        padding: 0.1rem 0.4rem;
+        border-radius: 4px;
+      }
+      p.lead {
+        font-size: 0.85rem;
+        color: #555;
+        margin-top: 0.2rem;
+      }
+      h2.sub {
+        font-size: 1rem;
+        margin-top: 1.8rem;
+        border-bottom: 1px solid #e2e2e2;
+        padding-bottom: 0.3rem;
+      }
+      .cards {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        margin-top: 0.75rem;
+      }
+      .card {
+        border: 1px solid #d9e0e8;
+        border-radius: 6px;
+        padding: 0.6rem 0.9rem;
+        min-width: 6.5rem;
+      }
+      .card .n {
+        font-size: 1.5rem;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
+      .card .label {
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: #667;
+      }
+      .added-fg {
+        color: #2e7d32;
+      }
+      .changed-fg {
+        color: #b26a00;
+      }
+      .removed-fg {
+        color: #c62828;
+      }
+      .unchanged-fg {
+        color: #607d8b;
+      }
+      .card.added .n {
+        color: #2e7d32;
+      }
+      .card.modified .n {
+        color: #b26a00;
+      }
+      .card.deleted .n {
+        color: #c62828;
+      }
+      .card.unchanged .n {
+        color: #607d8b;
+      }
+      .muted {
+        color: #889;
+        font-size: 0.8rem;
+      }
+      /* Field changes stacked above the (full-width) records table. */
+      .stack > section + section {
+        margin-top: 1rem;
+      }
+      table.fields {
+        border-collapse: collapse;
+        margin-top: 0.5rem;
+        font-size: 0.82rem;
+        width: 100%;
+      }
+      table.fields th,
+      table.fields td {
+        padding: 0.3rem 0.6rem;
+        text-align: left;
+        border-bottom: 1px solid #eee;
+      }
+      table.fields td.path {
+        font-family: ui-monospace, monospace;
+      }
+      table.fields td.num,
+      table.fields th.num {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      tr.field-row {
+        cursor: pointer;
+      }
+      tr.field-row:hover td {
+        background: #f6f8fb;
+      }
+      tr.field-row.active td {
+        background: #eef3ff;
+        font-weight: 600;
+      }
+      table#recs {
+        font-size: 0.82rem;
+      }
+      table#recs td.rec {
+        font-family: ui-monospace, monospace;
+      }
+      .badge {
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        padding: 0.05rem 0.4rem;
+        border-radius: 3px;
+        border: 1px solid currentColor;
+      }
+      .badge.added {
+        color: #2e7d32;
+      }
+      .badge.modified {
+        color: #b26a00;
+      }
+      .badge.deleted {
+        color: #c62828;
+      }
+      .filter-banner {
+        font-size: 0.8rem;
+        margin: 0.5rem 0;
+        padding: 0.35rem 0.6rem;
+        background: #eef3ff;
+        border: 1px solid #d3e0ff;
+        border-radius: 4px;
+        display: none;
+      }
+      .filter-banner button {
+        margin-left: 0.5rem;
+        font-size: 0.72rem;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    {% include "_nav.html" %}
+
+    <a class="back" href="{{ url_for('sources.index') }}">&larr; Sources</a>
+
+    <h1>Run analysis: <code>{{ report.run_id }}</code></h1>
+    <p class="lead">
+      {{ report.source }} &middot; {{ report.run_type }} &middot;
+      {{ report.run_date }} &middot; {{ report.record_count }} actions
+      ({{ report.index_count }} index, {{ report.delete_count }} delete)
+    </p>
+    <p class="muted">
+      Each record compared against its <strong>previous version</strong> &mdash;
+      the newest version before this run. New-vs-modified is a true split, not the
+      run's <code>index</code> count. Computed live from the dataset, so deletions
+      are visible and the corpus is not involved.
+    </p>
+
+    <h2 class="sub">Records vs. their previous version</h2>
+    <div class="cards">
+      <div class="card added">
+        <div class="n">{{ report.records.added }}</div>
+        <div class="label">added</div>
+      </div>
+      <div class="card modified">
+        <div class="n">{{ report.records.modified }}</div>
+        <div class="label">modified</div>
+      </div>
+      <div class="card unchanged">
+        <div class="n">{{ report.records.unchanged }}</div>
+        <div class="label">unchanged</div>
+      </div>
+      <div class="card deleted">
+        <div class="n">{{ report.records.deleted }}</div>
+        <div class="label">deleted</div>
+      </div>
+      <div class="card">
+        <div class="n">{{ report.records.touched }}</div>
+        <div class="label">touched</div>
+      </div>
+    </div>
+
+    <div class="stack">
+      <section>
+        <h2 class="sub">Field changes</h2>
+        <p class="muted">
+          Across the {{ report.records.modified }} modified record(s), per path:
+          records this run <span class="added-fg">added</span>,
+          <span class="changed-fg">changed</span>, or
+          <span class="removed-fg">removed</span> it. Click a row to filter the
+          records table to those records.
+        </p>
+        {% if report.fields %}
+        <table class="fields">
+          <thead>
+            <tr>
+              <th>path</th>
+              <th class="num added-fg">add</th>
+              <th class="num changed-fg">chg</th>
+              <th class="num removed-fg">rem</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for f in report.fields %}
+            <tr class="field-row" data-path="{{ f.path }}">
+              <td class="path">{{ f.path }}</td>
+              <td class="num">{{ f.added_in or "" }}</td>
+              <td class="num">{{ f.changed_in or "" }}</td>
+              <td class="num">{{ f.removed_in or "" }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="muted">No field-level changes.</p>
+        {% endif %}
+      </section>
+
+      <section>
+        <h2 class="sub">Changed records</h2>
+        <p class="muted">
+          The {{ report.records.added + report.records.modified +
+          report.records.deleted }} records this run added, modified, or deleted
+          (unchanged re-indexes excluded). Each links to a side-by-side diff of its
+          previous and run versions.
+        </p>
+        <div class="filter-banner" id="filter-banner">
+          Filtered to records where <code id="filter-path"></code> changed
+          <button type="button" id="filter-clear">clear</button>
+        </div>
+        <table id="recs" class="display" style="width: 100%">
+          <thead>
+            <tr>
+              <th>record</th>
+              <th>change</th>
+              <th>previous run</th>
+              <th>prev. date</th>
+            </tr>
+          </thead>
+        </table>
+      </section>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.datatables.net/2.1.8/js/dataTables.min.js"></script>
+    <script>
+      const RECORDS = {{ report.records_detail | tojson }};
+      const RUN_ID = {{ report.run_id | tojson }};
+      // /record/<id>/versions and /record/<id>, with a placeholder id resolved by
+      // Flask then swapped per row.
+      const VERSIONS_BASE =
+        "{{ url_for('main.record_versions', timdex_record_id='__RID__') }}";
+      const RECORD_BASE =
+        "{{ url_for('main.record_current', timdex_record_id='__RID__') }}";
+
+      // Where a record row links. Modified/deleted records have a previous version,
+      // so deep-link to the two-version diff (previous on the left, this run's
+      // version on the right). Added records have no previous -- a diff would show
+      // nothing -- so link straight to the run's version of the record instead.
+      function diffUrl(row) {
+        const base = RECORD_BASE.replace(
+          "__RID__",
+          encodeURIComponent(row.record_id),
+        );
+        if (row.prev_run_id == null) {
+          return `${base}/${encodeURIComponent(RUN_ID)}/${encodeURIComponent(row.run_offset)}`;
+        }
+        const versions = VERSIONS_BASE.replace(
+          "__RID__",
+          encodeURIComponent(row.record_id),
+        );
+        const left = `${row.prev_run_id}|${row.prev_offset}`;
+        const right = `${RUN_ID}|${row.run_offset}`;
+        const p = new URLSearchParams({ left, right });
+        return `${versions}?${p.toString()}`;
+      }
+
+      function renderRecord(data, type, row) {
+        if (type !== "display") return data;
+        const a = document.createElement("a");
+        a.href = diffUrl(row);
+        a.target = "_blank";
+        a.rel = "noopener";
+        a.textContent = data;
+        return a.outerHTML;
+      }
+      function renderStatus(data) {
+        return `<span class="badge ${data}">${data}</span>`;
+      }
+
+      // Field-row click filters the table to records that changed that path.
+      let activePath = null;
+      DataTable.ext.search.push((settings, _data, _idx, rowData) => {
+        if (settings.nTable.id !== "recs") return true;
+        if (!activePath) return true;
+        return (rowData.changed_paths || []).includes(activePath);
+      });
+
+      const table = new DataTable("#recs", {
+        data: RECORDS,
+        columns: [
+          { data: "record_id", render: renderRecord },
+          { data: "status", render: renderStatus },
+          { data: "prev_run_id", defaultContent: "—" },
+          { data: "prev_run_date", defaultContent: "—" },
+        ],
+        order: [[1, "asc"]],
+        pageLength: 25,
+        lengthMenu: [10, 25, 50, 100],
+      });
+
+      const banner = document.getElementById("filter-banner");
+      function setFilter(path) {
+        activePath = path;
+        document.querySelectorAll("tr.field-row").forEach((tr) => {
+          tr.classList.toggle("active", tr.dataset.path === path);
+        });
+        if (path) {
+          document.getElementById("filter-path").textContent = path;
+          banner.style.display = "";
+        } else {
+          banner.style.display = "none";
+        }
+        table.draw();
+      }
+
+      document.querySelectorAll("tr.field-row").forEach((tr) => {
+        tr.addEventListener("click", () => {
+          setFilter(tr.dataset.path === activePath ? null : tr.dataset.path);
+        });
+      });
+      document
+        .getElementById("filter-clear")
+        .addEventListener("click", () => setFilter(null));
+    </script>
+  </body>
+</html>

@@ -47,6 +47,7 @@ from timmy.analysis.corpus import REPORT_WARN_THRESHOLD
 from timmy.corpus_job import corpus_job
 from timmy.dataset import dataset_lock, get_app_dataset
 from timmy.filters import split_csv
+from timmy.run_diff_cache import run_diff_cache
 
 analysis_bp = Blueprint("analysis", __name__, url_prefix="/analysis")
 
@@ -200,6 +201,83 @@ def report_fragment() -> str:
         scoped=bool(scope_args),
         scope_args=scope_args,
     )
+
+
+def _diff_compute(run_id: str):
+    """A closure that computes ``run_id``'s diff, holding ``dataset_lock`` around
+    the (shared-connection) reads. Handed to the run-diff cache to run in the
+    background or synchronously.
+
+    The dataset is resolved *now* (in the request thread, where the app context
+    exists) and captured -- the background thread that later runs ``compute`` has no
+    app context, so it can't call ``get_app_dataset()`` itself.
+    """
+    dataset = get_app_dataset()
+
+    def compute(on_progress):
+        with dataset_lock:
+            return analysis.diff_run(
+                dataset,
+                run_id,
+                include_records=True,
+                on_progress=on_progress,
+            )
+
+    return compute
+
+
+@analysis_bp.get("/run/<path:run_id>")
+def run_page(run_id: str):
+    """Run analysis: what one ETL run changed vs. the prior state of its records.
+
+    Computed live from the dataset (not the corpus) and cached per ``run_id`` for the
+    life of the process -- a large run can take a while, so the first view computes
+    in the background behind a progress page and a revisit is instant.
+    ``?format=json`` blocks and returns the raw report for agents/scripting. A run id
+    that doesn't exist 404s.
+    """
+    want_json = request.args.get("format") == "json"
+    report = run_diff_cache.get(run_id)
+
+    # Nothing cached: validate the run id up front (cheap, metadata-only) so an
+    # unknown run 404s immediately instead of after a background round-trip. The
+    # meta also heads the progress page.
+    meta = None
+    if report is None:
+        with dataset_lock:
+            meta = analysis.run_meta(get_app_dataset(), run_id)
+        if meta is None:
+            abort(404, description=f"No run found with run_id {run_id!r}.")
+
+    if want_json:
+        if report is None:
+            report = run_diff_cache.compute_now(run_id, _diff_compute(run_id))
+        return jsonify(report)
+
+    if report is not None:
+        return render_template("analysis_run.html", report=report)
+
+    # Kick off (or join) the background diff and show a progress page that polls and
+    # reloads this URL -- which then hits the cache and renders the result -- when done.
+    run_diff_cache.ensure(run_id, _diff_compute(run_id))
+    return render_template("analysis_run_job.html", run_id=run_id, meta=meta)
+
+
+@analysis_bp.get("/run/<path:run_id>/status.json")
+def run_status(run_id: str):
+    """Progress snapshot for a run-diff being computed, polled by the progress page."""
+    status = run_diff_cache.status(run_id)
+    if status is None:
+        # No job started (e.g. a stray poll) -- report an idle, not-ready state.
+        status = {
+            "running": False,
+            "phase": None,
+            "error": None,
+            "finished": False,
+            "ready": False,
+            "elapsed": 0,
+        }
+    return jsonify(status)
 
 
 def _run_with_lock(fn, dataset, analyses_dir, **kwargs):

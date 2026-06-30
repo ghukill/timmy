@@ -518,6 +518,82 @@ def analysis_query(
 
 
 # --------------------------------------------------------------------------- #
+# analysis run (run-diff: what one ETL run changed)
+# --------------------------------------------------------------------------- #
+def _render_run_diff(report: dict) -> None:
+    """Human rendering of a run-diff report (the --json path emits it verbatim)."""
+    recs = report["records"]
+    click.echo(
+        f"Run {report['run_id']}  ({report['source']} {report['run_type']}, "
+        f"{report['run_date']})"
+    )
+    click.echo(
+        f"  {report['record_count']} actions: {report['index_count']} index, "
+        f"{report['delete_count']} delete"
+    )
+    click.echo("")
+    click.echo("Records vs. their previous version:")
+    emit_record(
+        {
+            "added": recs["added"],
+            "modified": recs["modified"],
+            "unchanged": recs["unchanged"],
+            "deleted": recs["deleted"],
+            "touched": recs["touched"],
+        },
+        as_json=False,
+    )
+    if report["fields"]:
+        click.echo("")
+        click.echo("Field changes (records per path):")
+        emit_rows(
+            report["fields"],
+            as_json=False,
+            columns=["path", "added_in", "changed_in", "removed_in"],
+        )
+
+
+@analysis.command("run")
+@click.argument("run_id")
+@click.option(
+    "--examples", default=None, type=int,
+    help="Example record ids to surface per change class (default 10).",
+)
+@json_option
+@click.pass_context
+def analysis_run(
+    ctx: click.Context, run_id: str, examples: int | None, as_json: bool
+) -> None:
+    """Diff one ETL run against the previous version of the records it touched.
+
+    A *run analysis*: what did this run add, modify, or delete? Computed live from
+    the dataset (not the corpus), so it works regardless of corpus freshness and
+    sees deletions the current-only corpus can't. The new-vs-modified split -- which
+    the run's own action counts can't give you -- comes from comparing each record
+    against its prior version.
+    """
+    from timmy.analysis import diff_run
+
+    _configure_cli_logging(ctx)
+    td = _load_dataset(ctx)
+    try:
+        report = diff_run(
+            td, run_id,
+            examples=10 if examples is None else examples,
+            on_progress=lambda phase: click.echo(f"  {phase}…", err=True),
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 -- surface dataset/read failures cleanly
+        raise click.ClickException(f"Run analysis failed: {exc}") from exc
+
+    if as_json:
+        emit_json(report)
+        return
+    _render_run_diff(report)
+
+
+# --------------------------------------------------------------------------- #
 # analysis build / update / delete (corpus lifecycle)
 # --------------------------------------------------------------------------- #
 def _load_dataset(ctx: click.Context):

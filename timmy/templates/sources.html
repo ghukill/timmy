@@ -102,6 +102,26 @@
       .run-id-cell input {
         flex: 0 0 auto;
       }
+      /* Dedicated Diff column: a solid button so it reads as the row's primary
+         action, not an afterthought tucked beside the run id. */
+      td.diff-col {
+        white-space: nowrap;
+      }
+      a.diff-btn {
+        display: inline-block;
+        font-size: 0.72rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: #fff;
+        background: #6a4cff;
+        border-radius: 4px;
+        padding: 0.15rem 0.55rem;
+        text-decoration: none;
+      }
+      a.diff-btn:hover {
+        background: #573dd6;
+      }
     </style>
   </head>
   <body>
@@ -193,6 +213,7 @@
       <thead>
         <tr>
           <th>run_id</th>
+          <th>diff</th>
           <th>source</th>
           <th>run_type</th>
           <th>run_date</th>
@@ -214,6 +235,14 @@
       // Where the "open in records" hand-off lands; f_action is sent empty so
       // every action in the selected runs shows (not just the index default).
       const RECORDS_URL = "{{ url_for('main.records') }}";
+
+      // Per-run "what did this run change" analysis. Built with a placeholder run
+      // id so the route is resolved by Flask, then swapped per row.
+      const RUN_ANALYSIS_BASE =
+        "{{ url_for('analysis.run_page', run_id='__RID__') }}";
+      function runAnalysisUrl(runId) {
+        return RUN_ANALYSIS_BASE.replace("__RID__", encodeURIComponent(runId));
+      }
 
       // Build a /records URL pre-filtered to one or more run_ids. Browses all
       // versions (metadata.records) so the corpus matches the run's record count
@@ -249,6 +278,17 @@
         return wrap.outerHTML;
       }
 
+      // Dedicated Diff column: a button to "what did this run change" analysis.
+      function renderDiffButton(data, type) {
+        if (type !== "display") return "";
+        const a = document.createElement("a");
+        a.href = runAnalysisUrl(data);
+        a.textContent = "Diff";
+        a.className = "diff-btn";
+        a.title = "Analyze what this run changed vs. the prior state of its records";
+        return a.outerHTML;
+      }
+
       const numCol = { className: "num" };
       const table = new DataTable("#runs", {
         serverSide: true,
@@ -262,12 +302,20 @@
           },
         },
         orderMulti: false,
-        // Default sort: newest runs first.
-        order: [[4, "desc"]],
+        // Default sort: newest runs first (run_timestamp is column 5 now that the
+        // Diff button sits at column 1).
+        order: [[5, "desc"]],
         pageLength: 25,
         lengthMenu: [10, 25, 50, 100],
         columns: [
           { data: "run_id", render: renderRunId },
+          {
+            data: "run_id",
+            render: renderDiffButton,
+            orderable: false,
+            searchable: false,
+            className: "diff-col",
+          },
           { data: "source" },
           { data: "run_type" },
           { data: "run_date" },

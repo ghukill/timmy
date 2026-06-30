@@ -65,7 +65,11 @@
   </head>
   <body>
     {% include "_nav.html" %}
-    <p><a class="back" href="{{ url_for('main.records') }}">&larr; Back to records</a></p>
+    <p>
+      <a class="back" href="{{ url_for('main.records') }}">&larr; Back to records</a>
+      &nbsp;&middot;&nbsp;
+      <a class="back" href="{{ url_for('main.record_current', timdex_record_id=timdex_record_id) }}">View current record</a>
+    </p>
     <h1>{{ timdex_record_id }}<span class="badge">{{ source }}</span></h1>
     <p class="hint">
       All versions across runs, newest first. Tick <strong>two</strong> rows to
@@ -179,6 +183,32 @@
 
       // Reapply selection state after DataTables redraws the table body.
       table.on("draw", refreshCheckboxes);
+
+      // run_id|offset -> run_timestamp for every version (server-rendered), so a
+      // deep-link can preselect versions that live on a not-yet-rendered page.
+      const VERSION_TS = {
+        {% for v in versions -%}
+        "{{ v.run_id }}|{{ v.run_record_offset }}": "{{ v.run_timestamp }}",
+        {% endfor -%}
+      };
+
+      // Deep-link: ?left=<run_id>|<offset>&right=<run_id>|<offset> preselects those
+      // two versions and renders their diff immediately (e.g. arriving from a run
+      // analysis row: previous version on the left, the run's version on the right).
+      (function preselectFromUrl() {
+        const params = new URLSearchParams(window.location.search);
+        ["left", "right"].forEach((side) => {
+          const key = params.get(side);
+          if (key && VERSION_TS[key] && selected.size < 2) {
+            const [runId, offset] = key.split("|");
+            selected.set(key, { runId, offset, ts: VERSION_TS[key] });
+          }
+        });
+        if (selected.size) {
+          refreshCheckboxes();
+          renderDiff();
+        }
+      })();
 
       function buildDiff(elId, metaId, t1, t2, older, newer) {
         document.getElementById(metaId).textContent =
