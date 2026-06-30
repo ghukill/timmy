@@ -216,22 +216,22 @@
           records table to those records.
         </p>
         {% if report.fields %}
-        <table class="fields">
+        <table id="fields" class="fields display" style="width: 100%">
           <thead>
             <tr>
               <th>path</th>
-              <th class="num added-fg">add</th>
-              <th class="num changed-fg">chg</th>
-              <th class="num removed-fg">rem</th>
+              <th class="num added-fg">added</th>
+              <th class="num changed-fg">changed</th>
+              <th class="num removed-fg">removed</th>
             </tr>
           </thead>
           <tbody>
             {% for f in report.fields %}
             <tr class="field-row" data-path="{{ f.path }}">
               <td class="path">{{ f.path }}</td>
-              <td class="num">{{ f.added_in or "" }}</td>
-              <td class="num">{{ f.changed_in or "" }}</td>
-              <td class="num">{{ f.removed_in or "" }}</td>
+              <td class="num" data-order="{{ f.added_in or 0 }}">{{ f.added_in or "" }}</td>
+              <td class="num" data-order="{{ f.changed_in or 0 }}">{{ f.changed_in or "" }}</td>
+              <td class="num" data-order="{{ f.removed_in or 0 }}">{{ f.removed_in or "" }}</td>
             </tr>
             {% endfor %}
           </tbody>
@@ -334,12 +334,33 @@
         lengthMenu: [10, 25, 50, 100],
       });
 
+      // Field changes is its own DataTable -- sortable (default by path) and
+      // searchable. The count columns sort numerically via each cell's
+      // data-order (the display blanks zeros). Absent when there are no fields.
+      const fieldsEl = document.getElementById("fields");
+      const fieldsTable = fieldsEl
+        ? new DataTable(fieldsEl, {
+            order: [[0, "asc"]],
+            pageLength: 25,
+            lengthMenu: [10, 25, 50, 100],
+          })
+        : null;
+
       const banner = document.getElementById("filter-banner");
+
+      // Mark the active field on every row (including off-page ones) so the
+      // highlight survives sorting, searching, and pagination.
+      function highlightActiveField() {
+        if (!fieldsTable) return;
+        fieldsTable.rows().every(function () {
+          const node = this.node();
+          node.classList.toggle("active", node.dataset.path === activePath);
+        });
+      }
+
       function setFilter(path) {
         activePath = path;
-        document.querySelectorAll("tr.field-row").forEach((tr) => {
-          tr.classList.toggle("active", tr.dataset.path === path);
-        });
+        highlightActiveField();
         if (path) {
           document.getElementById("filter-path").textContent = path;
           banner.style.display = "";
@@ -349,11 +370,13 @@
         table.draw();
       }
 
-      document.querySelectorAll("tr.field-row").forEach((tr) => {
-        tr.addEventListener("click", () => {
+      if (fieldsEl) {
+        fieldsEl.querySelector("tbody").addEventListener("click", (e) => {
+          const tr = e.target.closest("tr.field-row");
+          if (!tr) return;
           setFilter(tr.dataset.path === activePath ? null : tr.dataset.path);
         });
-      });
+      }
       document
         .getElementById("filter-clear")
         .addEventListener("click", () => setFilter(null));
